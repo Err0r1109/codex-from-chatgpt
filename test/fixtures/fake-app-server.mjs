@@ -29,5 +29,9 @@ input.on("line", (line) => {
     return;
   }
   if (message.method === "slow") return;
+  if (message.method === "environmentSafety") {
+    output({ id: message.id, result: { hasInferenceKey: !!process.env.OPENAI_API_KEY, hasTunnelKey: !!process.env.CONTROL_PLANE_API_KEY, hasSecret: !!process.env.BRIDGE_SECRET, normalValue: process.env.BRIDGE_TEST_NORMAL } });
+    return;
+  }
   if (message.id !== undefined) output({ id: message.id, result: {} });
 });

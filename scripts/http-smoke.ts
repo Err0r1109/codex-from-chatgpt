@@ -10,6 +10,9 @@ await c.connect(
   new StreamableHTTPClientTransport(new URL("http://127.0.0.1:18887/mcp")),
 );
 try {
+  const models = await c.callTool({ name: "codex_models_list", arguments: {} });
+  if (models.isError) throw Error("Live MCP model discovery failed");
+  console.log(JSON.stringify({ live_models: models.structuredContent.models }));
   console.log(
     JSON.stringify({
       era: c.getProtocolEra(),

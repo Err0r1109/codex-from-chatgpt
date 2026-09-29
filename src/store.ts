@@ -19,10 +19,14 @@ import {
   type EventState,
 } from "./event-state.js";
 import { makePrivate } from "./private-files.js";
+import type { Settings, TurnModelEvidence } from "./models.js";
+import { settingsSchema, evidenceSchema } from "./models.js";
 
 export const STATE_VERSION = 2;
 
 export type PersistedJob = {
+  thread_settings?: Settings | null;
+  model_evidence?: TurnModelEvidence[];
   job_id: string;
   thread_id: string | null;
   workspace: string;
@@ -48,7 +52,7 @@ export type PersistedJob = {
   turn_count?: number;
   requests?: Record<
     string,
-    { hash: string; turn_id: string | null; previous_turn_id?: string | null }
+    { hash: string; hash_version?: 2; turn_id: string | null; previous_turn_id?: string | null }
   >;
   stopped?: boolean;
   deadline?: number | null;
@@ -98,6 +102,8 @@ function validValidation(value: unknown): value is PersistedValidation {
 
 function validJob(value: unknown): value is PersistedJob {
   if (!isObject(value)) return false;
+  if (value.thread_settings != null && !settingsSchema.safeParse(value.thread_settings).success) return false;
+  if (value.model_evidence !== undefined && !evidenceSchema.safeParse(value.model_evidence).success) return false;
   return (
     typeof value.job_id === "string" &&
     value.job_id.length > 0 &&
@@ -141,6 +147,7 @@ function validJob(value: unknown): value is PersistedJob {
           (r) =>
             isObject(r) &&
             typeof r.hash === "string" &&
+            (r.hash_version === undefined || r.hash_version === 2) &&
             (r.turn_id === null || typeof r.turn_id === "string") &&
             optionalNullableString(r.previous_turn_id),
         )))

@@ -17,36 +17,8 @@ import { StateStore } from "./store.js";
 import { EventService } from "./events.js";
 import { makePrivate } from "./private-files.js";
 
-export async function resolveWorker(
-  client: CodexAppServer,
-): Promise<string | undefined> {
-  const account = await client.request<{ account?: { type?: string } }>(
-    "account/read",
-    { refreshToken: false },
-  );
-  if (account.account?.type !== "chatgpt")
-    throw new Error(
-      "ChatGPT-authenticated Codex required; no API-key fallback",
-    );
-  const models: Array<{ model: string; displayName: string }> = [];
-  let cursor: string | null = null;
-  do {
-    const page: { data: typeof models; nextCursor: string | null } =
-      await client.request("model/list", {
-        limit: 100,
-        includeHidden: false,
-        cursor,
-      });
-    models.push(...page.data);
-    cursor = page.nextCursor;
-  } while (cursor);
-  const luna = models
-    .filter((m) => /luna/i.test(m.displayName))
-    .sort((a, b) =>
-      b.model.localeCompare(a.model, undefined, { numeric: true }),
-    )[0];
-  return luna?.model;
-}
+import { requireChatGPT } from "./models.js";
+
 async function main() {
   const config = runtimeConfig();
   if (!isLoopbackHost(config.host))
@@ -69,11 +41,9 @@ async function main() {
   let events: EventService | undefined;
   try {
     await appServer.start();
-    const model = await resolveWorker(appServer);
-    console.error(
-      `Codex worker: ${model ?? "installed default (no Luna in model/list)"}; authentication: ChatGPT`,
-    );
-    const jobs = new JobManager(appServer, { store, model });
+    await requireChatGPT(appServer);
+    console.error("Codex worker: App Server default; authentication: ChatGPT");
+    const jobs = new JobManager(appServer, { store });
     events = new EventService(store, (id) => jobs.authorizeTask(id));
     await jobs.initialize();
     const handler = createBridgeHandler(jobs, events);
@@ -97,7 +67,7 @@ async function main() {
             "Content-Type": "application/json",
           });
           res.end(
-            JSON.stringify({ ok: true, ready, model, protocol: "2026-07-28" }),
+            JSON.stringify({ ok: true, ready, authentication: "chatgpt", protocol: "2026-07-28" }),
           );
         } else if (url.pathname === "/mcp") await handleMcp(req, res);
         else {

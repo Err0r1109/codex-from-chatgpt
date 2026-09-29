@@ -10,18 +10,25 @@ Fork of [joseanu/codex-from-chatgpt](https://github.com/joseanu/codex-from-chatg
 
 | Tool                                                                | Purpose                                                                                                                                                                   |
 | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `codex_models_list()` | Live account model catalog: IDs, display names, supported/default reasoning efforts, visibility and availability metadata. |
 | `codex_task_create(workspace)`                                      | Validate an existing directory under the operator's root, durably prepare a task/thread, return `ready`. No turn starts.                                                  |
 | `codex_turn_submit(task_id, prompt, request_id, expected_revision)` | Start a turn on that thread and return after acceptance. Same ID and prompt never start another turn, including after restart. Different content under the same ID fails. |
 | `codex_task_get(task_id, detail?, since_revision?)`                 | Bounded compact, standard or debug evidence. Debug includes actual command statuses/exit codes.                                                                           |
 | `codex_task_stop(task_id)`                                          | Durably stop the task and interrupt its exact active turn. Later submissions are blocked.                                                                                 |
 
-Create → subscribe → submit. Use a stable logical request ID, such as `review-TASK-OBSERVED_REVISION`, and ignore handled/outdated event revisions. A retry with a new ID is a new operation. Stale expected revisions fail. Never infer test success from worker prose: inspect protocol completion, validation and exit codes.
+Create → subscribe → submit. Both create and submit accept optional `model` and `reasoning_effort`. Choose model IDs from `codex_models_list`; exact display names and unambiguous single-word names also work. Ambiguous names fail. `minimum`/`maximum` select the lowest/highest advertised effort; unknown future effort labels require an exact selection. Every new submission revalidates against live `model/list`. No model list is hardcoded.
+
+Omitted selection preserves Codex defaults on creation and the current settings on later turns. Explicit model selection with omitted effort uses that model's advertised default. `model: "default"` restores the installed Codex configuration, including its effort. Per-turn overrides use `turn/start` on the same thread and become its subsequent defaults, as documented by App Server.
+
+Use a stable logical request ID, such as `review-TASK-OBSERVED_REVISION`, and ignore handled/outdated event revisions. A retry with a new ID is a new operation. Stale expected revisions fail. The idempotency record includes prompt and model/effort selection; changing any under the same request ID fails. Never infer test success from worker prose: inspect protocol completion, validation and exit codes.
+
+Task reads include durable `model_evidence` per turn: requested selection, resolved arguments, and separately `effective` runtime settings with a protocol source. `thread/settings/updated` confirms overrides; omitted overrides inherit the previously confirmed thread settings. Missing runtime evidence stays null. A `model/rerouted` notification records the actual replacement model without inventing its unreported effort.
 
 `events/list`, `events/subscribe` and `events/unsubscribe` share `/mcp`. Event `codex.task_changed` takes `{ "task_id": "UUID" }`. Payload: task ID, revision, status, reason and optional turn ID; no prompt, transcript, instructions or diff.
 
 ## Run
 
-Requires Node 20+, installed Codex and its existing ChatGPT login. The bridge checks `account/read`; API-key inference is rejected. Startup resolves the highest-version visible Luna through `model/list`. Without a Luna entry, the installed default is retained and reported. No model ID is hardcoded.
+Requires Node 20+, installed Codex and its existing ChatGPT login. The bridge checks `account/read` before work and recovery, forces the supported ChatGPT login mode/OpenAI provider, and strips API keys, tokens and tunnel secrets from the child environment. API-key inference is rejected. It retains the installed Codex default unless the caller selects a supported model/effort. No API billing, payment or credits operation is implemented.
 
 ```powershell
 npm ci
@@ -70,7 +77,11 @@ The official client is prepared at `%LOCALAPPDATA%\CodexMcpBridge\tunnel`. With 
 .\scripts\connect-chatgpt.ps1
 ```
 
-The script takes the tunnel ID/runtime key locally, creates the private official profile, runs `doctor`, then starts outbound tunneling. The key is for transport, not inference. Associate the tunnel with the intended ChatGPT workspace and complete the private plugin connection in Developer Mode. Rescan tools/events, then use [the acceptance prompt](scripts/chatgpt-acceptance.txt). Disposable directory: `%USERPROFILE%\codex-bridge-disposable\chatgpt-acceptance`.
+The setup script inspects existing official runtimes/profiles, checks bridge readiness and runs `doctor`. Missing authorization returns `PLATFORM_AUTHORIZATION_REQUIRED`, without enabling API services or generating duplicate tunnels. With verified authorization it creates/reuses the private profile and starts the official managed runtime; `tunnel-client runtimes stop codex-bridge` stops it.
+
+The runtime credential is solely for transport and lives outside the repository in `tunnel-runtime-key.txt`. The adjacent `tunnel-authorization.json` records the actual Platform permission review: `tunnelId`, `credentialSha256`, `modelInferenceAllowed: false`, `paidApiActivationRequired: false`, `tunnelsReadUseVerified: true`, and `verificationSource`. It is not self-attesting API proof: populate it only after inspecting the actual account/key permissions. Credential changes invalidate the review. Never probe inference to test permissions. Public RBAC docs separate Tunnels Read/Use from Model Capabilities Request; Batch Write also grants inference and must remain absent. Actual account/key restrictions remain unverified until Platform authorization is available. Stop if access requires billing activation, payment details, credits or inference permissions.
+
+Associate the tunnel with the intended ChatGPT workspace and complete the private plugin connection in Developer Mode. Rescan tools/events, then use [the acceptance prompt](scripts/chatgpt-acceptance.txt). Disposable directory: `%USERPROFILE%\codex-bridge-disposable\chatgpt-acceptance`.
 
 Acceptance requires the first event, after the initial ChatGPT response finished, to cause a task read and second programming turn in the subscribed conversation without another user message. Record actual host model if observable, confirmations and subscription survival. These remain unverified.
 

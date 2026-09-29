@@ -31,7 +31,7 @@ export function createMcpServer(
   // Events is the documented OpenAI draft extension, not yet in SDK capability types.
   const capabilities = { tools: {}, events: {} };
   const server = new McpServer(
-    { name: "Codex MCP Bridge", version: "0.4.0" },
+    { name: "Codex MCP Bridge", version: "0.5.0" },
     {
       capabilities,
       supportedProtocolVersions: ["2026-07-28"],
@@ -40,13 +40,22 @@ export function createMcpServer(
     },
   );
   const task_id = z.string().uuid();
+  const selection = {
+    model: z.string().min(1).max(200).describe("Live catalog ID, exact display name, unambiguous name, or 'default' for installed Codex defaults").optional(),
+    reasoning_effort: z.string().min(1).max(40).describe("Exact advertised effort, or 'minimum'/'maximum'. The literal effort 'max' is distinct from the maximum alias.").optional(),
+  };
+  server.registerTool("codex_models_list", {
+    description: "Read the live signed-in Codex model catalog, supported/default reasoning efforts and visibility. Choose exact model IDs. minimum/maximum resolve to the advertised effort bounds. Omit selection to keep thread defaults; model='default' resets to configured Codex defaults. Explicit model with omitted effort uses its catalog default. Inspect task model_evidence.effective for runtime evidence.",
+    inputSchema: z.object({}).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, () => call(() => manager.listModels()));
   server.registerTool(
     "codex_task_create",
     {
       description:
         "Create a durable task and Codex thread in an operator-authorized workspace. Does not execute a turn; subscribe before submitting.",
       inputSchema: z
-        .object({ workspace: z.string().min(1).max(4096) })
+        .object({ workspace: z.string().min(1).max(4096), ...selection })
         .strict(),
       annotations: {
         readOnlyHint: false,
@@ -55,7 +64,7 @@ export function createMcpServer(
         openWorldHint: false,
       },
     },
-    ({ workspace }) => call(() => manager.create(workspace)),
+    ({ workspace, ...selected }) => call(() => manager.create(workspace, selected)),
   );
   server.registerTool(
     "codex_turn_submit",
@@ -68,6 +77,7 @@ export function createMcpServer(
           prompt: z.string().min(1).max(100_000),
           request_id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
           expected_revision: z.number().int().nonnegative(),
+          ...selection,
         })
         .strict(),
       annotations: {
@@ -79,7 +89,7 @@ export function createMcpServer(
     },
     (p) =>
       call(() =>
-        manager.submit(p.task_id, p.prompt, p.request_id, p.expected_revision),
+        manager.submit(p.task_id, p.prompt, p.request_id, p.expected_revision, { model: p.model, reasoning_effort: p.reasoning_effort }),
       ),
   );
   server.registerTool(

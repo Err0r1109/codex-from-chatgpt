@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { CodexAppServer } from "../src/codex-app-server.js";
-import { resolveWorker } from "../src/index.js";
+import { ModelCatalog } from "../src/models.js";
 import { JobManager } from "../src/jobs.js";
 import { StateStore } from "../src/store.js";
 const workspace = process.argv[2];
@@ -15,8 +15,8 @@ const report = {};
 let a = new CodexAppServer({ spawnOptions: { windowsHide: true } });
 try {
   await a.start();
-  const model = await resolveWorker(a);
-  let m = new JobManager(a, { store: new StateStore(state), model });
+  await new ModelCatalog(a).list();
+  let m = new JobManager(a, { store: new StateStore(state) });
   const task = await m.create(workspace);
   await m.submit(
     task.job_id,
@@ -32,7 +32,7 @@ try {
     calls.push(method);
     return req(method, params);
   };
-  m = new JobManager(a, { store: new StateStore(state), model });
+  m = new JobManager(a, { store: new StateStore(state) });
   await m.initialize();
   report.after = m.get(task.job_id, { detail: "debug" });
   report.calls = calls;

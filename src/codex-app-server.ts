@@ -119,12 +119,14 @@ export class CodexAppServer implements AppServerClient {
   constructor(options: string | CodexAppServerOptions = {}) {
     const normalized: CodexAppServerOptions = typeof options === "string" ? { command: options } : options;
     this.command = normalized.command ?? process.env.CODEX_BIN ?? "codex";
-    this.commandArgs = normalized.commandArgs ?? ["app-server", "--stdio"];
+    this.commandArgs = normalized.commandArgs ?? ["app-server", "--stdio", "-c", 'forced_login_method="chatgpt"', "-c", 'model_provider="openai"'];
     this.rpcTimeoutMs = parseDuration(normalized.rpcTimeoutMs, Number(process.env.CODEX_RPC_TIMEOUT_MS) || 30_000);
     this.shutdownTimeoutMs = parseDuration(normalized.shutdownTimeoutMs, Number(process.env.CODEX_SHUTDOWN_TIMEOUT_MS) || 2_000);
     this.killTimeoutMs = parseDuration(normalized.killTimeoutMs, 1_000);
     this.spawnProcess = normalized.spawnProcess ?? spawn;
-    this.spawnOptions = normalized.spawnOptions ?? {};
+    const env = { ...(normalized.spawnOptions?.env ?? process.env) };
+    for (const name of Object.keys(env)) if (/API_KEY|TOKEN|SECRET|TUNNEL|OPENAI_BASE_URL/i.test(name)) delete env[name];
+    this.spawnOptions = { ...normalized.spawnOptions, env };
   }
 
   addMessageListener(listener: MessageListener): () => void {

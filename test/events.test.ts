@@ -49,6 +49,9 @@ class Fake {
   }
   async request(method, params) {
     this.requests.push({ method, params });
+    if (method === "account/read") return { account: { type: "chatgpt" } };
+    if (method === "model/list") return { data: [{ id: "fixture", model: "fixture", displayName: "Fixture", hidden: false, isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "default" }], defaultReasoningEffort: "medium" }], nextCursor: null };
+    if (method === "config/read") return { config: {} };
     if (
       method === "thread/start" ||
       method === "thread/read" ||
@@ -332,11 +335,13 @@ test("modern discover, events/list, tools/call and create-subscribe-submit elimi
   );
   const tools = (await rpc("tools/list")).result.tools;
   assert.deepEqual(tools.map((x) => x.name).sort(), [
+    "codex_models_list",
     "codex_task_create",
     "codex_task_get",
     "codex_task_stop",
     "codex_turn_submit",
   ]);
+  assert.equal((await rpc("tools/call", { name: "codex_models_list", arguments: {} })).result.structuredContent.models[0].model, "fixture");
   const created = (
     await rpc("tools/call", {
       name: "codex_task_create",

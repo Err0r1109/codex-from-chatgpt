@@ -43,6 +43,9 @@ class FakeAppServer implements AppServerClient {
   async start(): Promise<void> {}
   async request<T>(method: string, params?: unknown): Promise<T> {
     this.requests.push({ method, params });
+    if (method === "account/read") return { account: { type: "chatgpt" } } as T;
+    if (method === "model/list") return { data: [{ id: "fixture", model: "fixture", displayName: "Fixture", hidden: false, isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "default" }], defaultReasoningEffort: "medium" }], nextCursor: null } as T;
+    if (method === "config/read") return { config: {} } as T;
     if (method === "thread/start") {
       if (this.threadStartError) throw this.threadStartError;
       return { thread: { id: "thread-1" } } as T;

@@ -21,6 +21,7 @@ import {
   type PersistedValidation,
 } from "./store.js";
 import { validateWorkspace } from "./workspaces.js";
+import { ModelCatalog, requireChatGPT, type Selection, type Settings, type TurnModelEvidence } from "./models.js";
 
 export type JobStatus =
   | "input_required"
@@ -54,10 +55,12 @@ type PendingApproval = {
 };
 
 type JobRecord = {
+  settings: Settings | null;
+  modelEvidence: TurnModelEvidence[];
   turnCount: number;
   requests: Record<
     string,
-    { hash: string; turn_id: string | null; previous_turn_id?: string | null }
+    { hash: string; hash_version?: 2; turn_id: string | null; previous_turn_id?: string | null }
   >;
   stopped: boolean;
   deadline: number | null;
@@ -140,6 +143,8 @@ export type PendingApprovalView = {
 };
 
 export type JobSnapshot = {
+  thread_settings?: Settings | null;
+  model_evidence?: TurnModelEvidence[];
   pending_input?: unknown;
   task_id?: string;
   turn_count?: number;
@@ -188,8 +193,6 @@ export type JobGetOptions = {
 
 export type JobManagerOptions = {
   store?: StateStore;
-  model?: string;
-  reasoningEffort?: string;
   maxTurns?: number;
   turnTimeoutMs?: number;
 };
@@ -719,8 +722,7 @@ export class JobManager {
   private readonly jobsByThread = new Map<string, string>();
   private readonly turnCaptures = new Map<string, TurnCapture>();
   private readonly store: StateStore;
-  private readonly model: string | undefined;
-  private readonly reasoningEffort: string | undefined;
+  private readonly catalog: ModelCatalog;
   private activeJobId: string | null = null;
   private recoveryFence = false;
   private rehydrated = false;
@@ -756,11 +758,7 @@ export class JobManager {
       this.turnTimeoutMs > 86_400_000
     )
       throw new Error("Invalid turn timeout");
-    this.model =
-      options.model ?? (process.env.CODEX_AGENT_MODEL?.trim() || undefined);
-    this.reasoningEffort =
-      options.reasoningEffort ??
-      (process.env.CODEX_AGENT_REASONING_EFFORT?.trim() || undefined);
+    this.catalog = new ModelCatalog(appServer);
     this.loadPersistedIndex();
     appServer.addMessageListener((message) =>
       this.handleAppServerMessage(message),
@@ -774,7 +772,12 @@ export class JobManager {
     });
   }
 
-  async create(workspace: string): Promise<JobStartResult> {
+  async listModels() {
+    await this.appServer.start();
+    return { models: await this.catalog.list() };
+  }
+
+  async create(workspace: string, selection: Selection = {}): Promise<JobStartResult> {
     const canonicalWorkspace = await validateWorkspace(workspace);
     const stateRelative = path.relative(
       canonicalWorkspace,
@@ -788,7 +791,10 @@ export class JobManager {
     return this.withExclusive(async () => {
       await this.ensureReady();
       this.assertNoActiveTurn();
+      const resolved = await this.catalog.resolve(selection, null, canonicalWorkspace);
       const job: JobRecord = {
+        settings: null,
+        modelEvidence: [],
         turnCount: 0,
         requests: {},
         stopped: false,
@@ -824,7 +830,9 @@ export class JobManager {
             "No se pudo persistir el job antes de crear el thread.",
           );
         const response = await this.appServer.request<unknown>("thread/start", {
-          ...(this.model ? { model: this.model } : {}),
+          ...(resolved.model ? { model: resolved.model } : {}),
+          ...(resolved.reasoning_effort ? { config: { model_reasoning_effort: resolved.reasoning_effort } } : {}),
+          modelProvider: "openai",
           cwd: canonicalWorkspace,
           approvalPolicy: "on-request",
           approvalsReviewer: "user",
@@ -836,6 +844,7 @@ export class JobManager {
             : null;
         const threadId = requiredString(thread?.id, "thread.id");
         this.attachThread(job, threadId);
+        this.recordSettings(job, response, "thread/start");
         this.loadedThreads.add(threadId);
         this.persist(job, true);
         job.status = "ready";
@@ -885,19 +894,23 @@ export class JobManager {
     prompt: string,
     requestId: string,
     expectedRevision?: number,
+    selection: Selection = {},
   ): Promise<JobStartResult> {
     this.validatePrompt(prompt);
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId))
       throw new Error("Invalid request_id");
     return this.withExclusive(async () => {
       const job = this.getJob(jobId);
-      const hash = createHash("sha256").update(prompt).digest("hex");
+      const hash = createHash("sha256").update(JSON.stringify([prompt, selection.model ?? null, selection.reasoning_effort ?? null])).digest("hex");
       const prior = Object.hasOwn(job.requests, requestId)
         ? job.requests[requestId]
         : undefined;
       if (prior) {
-        if (prior.hash !== hash)
-          throw new Error("request_id already used for a different prompt");
+        // Old prompt-only records can only match a request with no overrides.
+        const compareHash = prior.hash_version === 2 ? hash :
+          !selection.model && !selection.reasoning_effort ? createHash("sha256").update(prompt).digest("hex") : null;
+        if (prior.hash !== compareHash)
+          throw new Error("request_id already used for a different prompt or model selection");
         return {
           ...this.startResult(job),
           turn_id: prior.turn_id ?? undefined,
@@ -934,6 +947,7 @@ export class JobManager {
         );
       await validateWorkspace(job.workspace);
       if (!this.loadedThreads.has(job.threadId)) {
+        await requireChatGPT(this.appServer);
         const resumed = await this.appServer.request<unknown>("thread/resume", {
           threadId: job.threadId,
           cwd: job.workspace,
@@ -963,9 +977,12 @@ export class JobManager {
           throw new Error("Thread recovery required");
         }
         this.loadedThreads.add(job.threadId);
+        this.recordSettings(job, resumed, "thread/resume");
       }
+      const resolved = await this.catalog.resolve(selection, job.settings, job.workspace);
+      if (job.settings?.model_provider && job.settings.model_provider !== "openai") throw new Error("Only ChatGPT-authenticated OpenAI Codex is permitted");
       Object.defineProperty(job.requests, requestId, {
-        value: { hash, turn_id: null, previous_turn_id: job.turnId },
+        value: { hash, hash_version: 2, turn_id: null, previous_turn_id: job.turnId },
         writable: true,
         enumerable: true,
         configurable: true,
@@ -973,7 +990,7 @@ export class JobManager {
       job.turnCount++;
       this.activeJobId = job.jobId;
       try {
-        await this.startTurn(job, prompt);
+        await this.startTurn(job, prompt, selection, resolved);
         job.requests[requestId]!.turn_id = job.turnId;
         this.persist(job, true);
       } catch (error) {
@@ -1163,6 +1180,7 @@ export class JobManager {
       throw new Error("State unreadable; operator recovery required");
     await this.appServer.start();
     if (!this.rehydrated || this.recoveryFence) {
+      await requireChatGPT(this.appServer);
       await this.rehydrate();
       this.rehydrated = true;
     }
@@ -1319,6 +1337,8 @@ export class JobManager {
       },
     );
     const job: JobRecord = {
+      settings: value.thread_settings ?? null,
+      modelEvidence: value.model_evidence ?? [],
       turnCount: value.turn_count ?? this.maxTurns,
       requests: value.requests ?? {},
       stopped: value.stopped ?? false,
@@ -1358,6 +1378,13 @@ export class JobManager {
     if (this.store.getDiagnostic()) console.error(`[Codex Agent] ${this.store.getDiagnostic()}`);
   }
 
+  private recordSettings(job: JobRecord, value: unknown, source: string): void {
+    if (!isObject(value) || typeof value.model !== "string") return;
+    const effort = value.reasoningEffort ?? value.effort;
+    job.settings = { model: value.model, reasoning_effort: typeof effort === "string" ? effort : null,
+      ...(typeof value.modelProvider === "string" ? { model_provider: value.modelProvider } : {}), source };
+  }
+
   private attachThread(job: JobRecord, threadId: string): void {
     if (job.threadId !== null && job.threadId !== threadId)
       this.jobsByThread.delete(job.threadId);
@@ -1371,10 +1398,13 @@ export class JobManager {
     this.touch(job);
   }
 
-  private async startTurn(job: JobRecord, prompt: string): Promise<void> {
+  private async startTurn(job: JobRecord, prompt: string, requested: Selection, resolved: Selection): Promise<void> {
     if (job.threadId === null)
       throw new Error("no hay thread confirmado para iniciar el turn.");
     this.resetTurn(job);
+    const evidence: TurnModelEvidence = { turn_id: null, requested, resolved, effective:
+      !resolved.model && !resolved.reasoning_effort && job.settings ? { ...job.settings, source: "inherited_thread_settings" } : null };
+    job.modelEvidence.push(evidence);
     job.deadline = Date.now() + this.turnTimeoutMs;
     this.persist(job, true); // Write-ahead intent: a crash must never permit replay.
     const turnPrompt = this.promptForTurn(job, prompt);
@@ -1388,9 +1418,9 @@ export class JobManager {
     const params: TurnStartParams = {
       threadId: job.threadId,
       input: [{ type: "text", text: turnPrompt, text_elements: [] }],
-      ...(this.model ? { model: this.model } : {}),
-      ...(this.reasoningEffort
-        ? { effort: this.reasoningEffort as TurnStartParams["effort"] }
+      ...(resolved.model ? { model: resolved.model } : {}),
+      ...(resolved.reasoning_effort
+        ? { effort: resolved.reasoning_effort as TurnStartParams["effort"] }
         : {}),
     };
     try {
@@ -1403,6 +1433,7 @@ export class JobManager {
       const turnId = requiredString(turn?.id, "turn.id");
       capture.turnId = turnId;
       job.turnId = turnId;
+      evidence.turn_id = turnId;
       for (const message of capture.buffered) {
         const legacyApproval =
           message.method === "applyPatchApproval" ||
@@ -1469,6 +1500,16 @@ export class JobManager {
     const threadId = stringValue(
       legacy ? params?.conversationId : params?.threadId,
     );
+    if (method === "thread/settings/updated" && threadId && params) {
+      const job = this.jobForThread(threadId);
+      if (job && isObject(params.threadSettings)) {
+        this.recordSettings(job, params.threadSettings, method);
+        const evidence = job.modelEvidence.at(-1);
+        if (evidence && isActiveStatus(job.status)) evidence.effective = job.settings ? { ...job.settings } : null;
+        this.persist(job);
+      }
+      return;
+    }
     if (
       method === "warning" ||
       method === "guardianWarning" ||
@@ -1495,7 +1536,7 @@ export class JobManager {
     if (
       capture &&
       capture.turnId === null &&
-      (isTurnScopedMethod(method) ||
+      (isTurnScopedMethod(method) || method === "model/rerouted" ||
         method === "item/tool/requestUserInput" ||
         method.includes("requestApproval") ||
         method === "applyPatchApproval" ||
@@ -1526,6 +1567,16 @@ export class JobManager {
       return;
     }
     switch (method) {
+      case "model/rerouted": {
+        const evidence = job.modelEvidence.at(-1);
+        if (evidence && typeof params.fromModel === "string" && typeof params.toModel === "string") {
+          (evidence.reroutes ??= []).push({ from: params.fromModel, to: params.toModel, reason: String(params.reason) });
+          // A reroute proves a different model, but does not report its effort.
+          evidence.effective = { model: params.toModel, reasoning_effort: null, source: method };
+          this.persist(job);
+        }
+        break;
+      }
       case "item/tool/requestUserInput": {
         if (message.id === undefined || !Array.isArray(params.questions))
           return;
@@ -1862,6 +1913,8 @@ export class JobManager {
     // command history and raw diffs remain available to detail=debug, but
     // exploratory diagnostics must not invalidate compact polling revisions.
     return JSON.stringify({
+      settings: job.settings,
+      modelEvidence: job.modelEvidence,
       stopped: job.stopped,
       turnCount: job.turnCount,
       threadId: job.threadId,
@@ -1897,6 +1950,8 @@ export class JobManager {
   private persist(_job: JobRecord, required = false): boolean {
     for (const job of this.jobs.values()) this.touch(job);
     const values: PersistedJob[] = [...this.jobs.values()].map((job) => ({
+      thread_settings: job.settings,
+      model_evidence: job.modelEvidence,
       job_id: job.jobId,
       thread_id: job.threadId,
       workspace: job.workspace,
@@ -2016,6 +2071,8 @@ export class JobManager {
 
   private identitySnapshot(job: JobRecord): JobSnapshot {
     const result: JobSnapshot = {
+      thread_settings: job.settings,
+      model_evidence: structuredClone(job.modelEvidence),
       status: job.status,
       revision: job.revision,
       job_id: job.jobId,
