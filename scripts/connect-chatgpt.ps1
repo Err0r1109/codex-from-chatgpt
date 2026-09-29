@@ -13,6 +13,7 @@ $profiles = Join-Path $runtime 'tunnel-profiles'
 
 # Inspect official state only, never another project's credentials.
 & $client profiles list
+if (Test-Path -LiteralPath $profiles) { & $client profiles list --profile-dir $profiles }
 & $client runtimes list
 if (!(Test-Path -LiteralPath $keyFile) -or !(Test-Path -LiteralPath $authorizationFile)) {
   # A ChatGPT login is not a Platform admin credential. Never exchange it through
@@ -44,5 +45,21 @@ if ($LASTEXITCODE -ne 0) { throw 'Tunnel doctor failed' }
 if ($PrepareOnly) { exit 0 }
 & $client runtimes connect --alias codex-bridge --profile codex-bridge --profile-dir $profiles --tunnel-id $authorization.tunnelId --mcp-server-url 'http://127.0.0.1:18887/mcp' --runtime-api-key "file:$keyFile"
 if ($LASTEXITCODE -ne 0) { throw 'Tunnel runtime could not connect' }
-& $client runtimes status codex-bridge --json
+$statusJson = & $client runtimes status codex-bridge --json
 if ($LASTEXITCODE -ne 0) { throw 'Tunnel runtime status failed' }
+$status = $statusJson | ConvertFrom-Json
+# Full runtime status includes a log tail. Keep normal setup output bounded and
+# factual; the official CLI remains available for an explicit diagnostic read.
+[ordered]@{
+  alias = $status.alias
+  tunnel_id = $status.tunnel_id
+  process_running = $status.process_running
+  ready = $status.ready
+  runtime_state = $status.runtime_state
+  remote_lookup_error = $status.remote_error
+  health_url = $status.health_url
+  ui_url = $status.ui_url
+} | ConvertTo-Json
+if (!$status.process_running -or !$status.ready -or $status.remote_error) {
+  throw 'Tunnel runtime is not ready or its remote identity could not be verified'
+}

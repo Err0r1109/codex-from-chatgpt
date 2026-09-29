@@ -1,5 +1,23 @@
 # Validation record
 
+## Live tunnel and ChatGPT connection, 2026-09-30
+
+Created the dedicated Codex MCP Bridge tunnel through the official Platform UI, associated with the intended ChatGPT workspace. Existing unrelated tunnels and credentials were not reused or changed. The actual key-creation summary showed **exactly Tunnels Read and Use**, every other category **None**, and expiration **Never**, explicitly requested by the operator. A first key that could not be saved was revoked before replacement. The replacement was saved through a local masked prompt, outside the repository, with user/SYSTEM ACLs. No secret was printed. No billing activation, payment method, credit purchase or inference API request occurred.
+
+Executed the authenticated branch of `scripts/connect-chatgpt.ps1`: profile creation, `doctor` and official managed runtime connection passed. Runtime control-plane health was `polling`, with zero consecutive failures; bridge `/readyz` reported ChatGPT authentication and protocol `2026-07-28`. The client's startup probe negotiated the same protocol and bridge version 0.5.0. Its detailed MCP health reports `same_child_evidence_unavailable` for HTTP transport; that field alone is not treated as a failure or proof of tool discovery.
+
+The connection script now emits compact status instead of the client's full embedded log tail and fails if readiness or remote identity verification is missing. PowerShell parsing, `-PrepareOnly`, and a second complete connection run passed; the existing managed runtime and health endpoint were reused. The runtime key's ACL contains only the current user and SYSTEM, with inheritance disabled. An exact-value scan confirmed the runtime key was absent from the official client's log.
+
+Created and connected the private ChatGPT plugin through its official UI. Its app details show all five tools and the **codex.task_changed** event. The tunnel recorded successful remote request/response exchanges, with no dispatcher failures. This establishes real remote discovery, not event-triggered execution.
+
+Initial acceptance attempt in Chat mode, with the UI explicitly selecting **GPT-5.6 Sol**: ChatGPT called the live model catalog and created task `7fe53be8-0a16-4517-a350-b8f2b96f9fff`, thread `01a0ef67-a3df-7121-b79c-7305952efe01`, revision 4. It reported no callable event-subscription capability and correctly stopped before the first submit. Durable bridge evidence confirms status ready, turn count zero, no subscription and no event.
+
+A separate Work-mode attempt, UI-selected **GPT-6 Sol**, explicitly requested the host Events capability rather than an ordinary bridge tool. It read the live catalog and created task `cff59d10-a7c0-411f-9455-47a42247d9b6`, thread `01a0ef6b-360b-7412-a1bf-a3b1a7c9efe6`, revision 4. It likewise reported the host subscription capability unavailable and stopped before submitting. Read-back through the official Codex app `read_thread` interface confirmed both final responses. Bridge persistence independently confirms both tasks remain ready, zero turns, zero subscriptions and zero outbox entries. The disposable repository still contains no test files.
+
+These are observed limits of the two tested conversation hosts, not a claim that MCP Events is universally unavailable or that the server lacks event methods. The official documentation describes subscription and event-triggered responses, and ChatGPT's plugin UI discovered the event successfully. No hidden endpoint, model API call, synthetic subscription, polling fallback or browser-driven follow-up was used to make the acceptance test appear successful. Chrome was used for the explicitly authorized connection setup and initial test launch; neither the bridge nor its orchestration transport depends on browser automation.
+
+**Acceptance remains blocked at subscription, before turn one.** No live ChatGPT webhook, callback verification, event-triggered task read, second turn, event-run model, write-tool confirmation or chat-lifecycle subscription survival was verified. The model names above are UI selections; no event run occurred, so they are not asserted as actual event-execution models. Existing real two-model App Server results below remain separate evidence.
+
 ## Model selection correction, 2026-09-30
 
 Removed the automatic Luna resolver. `codex_models_list` reads current `model/list`, including hidden/availability metadata; every new task/turn validates explicit model/effort against a fresh catalog. Default, exact efforts, minimum/maximum aliases and same-thread switching are covered. Selection enters the durable idempotency identity. Unknown actual settings remain unknown; the bridge never relabels requested settings as execution evidence.
@@ -19,9 +37,9 @@ Fresh recovery test after enforcing ChatGPT login mode: running turn `01a0ef46-4
 
 The updated real HTTP smoke test negotiated modern MCP and discovered all **five** tools. It read the live catalog, created a real ready thread without a turn, read settings and stopped it. Socket bound only to `127.0.0.1:18887`; health/readiness report ChatGPT authentication.
 
-Executed `scripts/connect-chatgpt.ps1` from the machine. Official v0.0.15 runtime/profile inventories are empty for this project; remote inventory requires an admin key. Doctor reports `FAILED_CHECKS tunnel_id`. No runtime key is available and no scope verification has been fabricated. The script now fails closed until actual tunnel-only permission review is recorded and tied to the key hash, then uses official managed runtime commands. The authenticated branch of setup has not yet been exercised.
+Before Platform setup, `scripts/connect-chatgpt.ps1` correctly failed closed with `FAILED_CHECKS tunnel_id`. The live tunnel section above supersedes that initial blocker and records the subsequently exercised authenticated path.
 
-Official [RBAC](https://developers.openai.com/api/docs/guides/rbac) separates Tunnels Read/Use from Model Capabilities Request; it also documents that Batch Write grants inference. [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) requires a runtime key. These documents do not establish this account's eligibility or charges. No payment, billing activation, API credits or model-inference API request was performed. Actual account permission verification and the decisive ChatGPT Events test remain blocked on Platform authorization. No product limitation on event-triggered continuation has been demonstrated.
+Official [RBAC](https://developers.openai.com/api/docs/guides/rbac) separates Tunnels Read/Use from Model Capabilities Request; it also documents that Batch Write grants inference. [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) requires a runtime key. These documents alone do not establish account eligibility or charges. The later live Platform setup above supplies account-specific permission evidence without probing model inference.
 
 Fork and freshly fetched upstream both started at `093bd39ea0770a80612a5184a85b82262759aa00`; no commits needed merging. MIT attribution and upstream remote retained. No architecture imported from the alternative project.
 
@@ -55,12 +73,10 @@ Socket observed only at `127.0.0.1:18887`; health/readiness work. On-wire discov
 
 ## ChatGPT acceptance: pending
 
-Official tunnel-client v0.0.15 downloaded from OpenAI. Runtime/profile inventory found no suitable bridge setup. Existing unrelated Local Browser Bridge process was neither reused nor modified. Official remote inventory returned `admin key is required`.
-
-Private operator config, ready server, disposable repository, setup script and acceptance prompt are prepared. Account-side tunnel authorization and ChatGPT plugin connection require the operator. These remain unverified:
+The live setup section above supersedes the former missing Platform authorization. Official tunnel-client v0.0.15, private runtime/profile, restricted credential and ChatGPT plugin connection are operational. Existing unrelated Local Browser Bridge resources were neither reused nor modified. These remain unverified because neither tested conversation could subscribe:
 
 - ChatGPT callback verification and actual event delivery.
 - Event-triggered read and second programming turn in the original conversation.
 - Actual event-run model, host tool confirmations and chat-lifecycle subscription survival.
 
-No evidence yet establishes a product limitation preventing continuation: account setup blocks that test. Synthetic webhook acceptance is never substituted for host execution.
+Synthetic webhook acceptance is never substituted for host execution. The bridge is left ready for a ChatGPT host that exposes the documented subscription capability.
