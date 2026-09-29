@@ -12,7 +12,7 @@ export class WorkspaceValidationError extends Error {
 }
 
 function configuredRoot(root = process.env.CODEX_WORKSPACE_ROOT ?? DEFAULT_WORKSPACE_ROOT): string {
-  if (!path.isAbsolute(root) || root.includes("\0") || root.split(path.sep).some((part) => part === "..")) {
+  if (!path.isAbsolute(root) || root.includes("\0") || root.split(/[\\/]/).some((part) => part === "..")) {
     throw new WorkspaceValidationError("CODEX_WORKSPACE_ROOT debe ser una ruta absoluta sin segmentos '..'.");
   }
   return root;
@@ -29,7 +29,7 @@ export async function validateWorkspace(input: string, rootInput?: string): Prom
   if (!path.isAbsolute(input)) {
     throw new WorkspaceValidationError("workspace debe ser una ruta absoluta.");
   }
-  if (input.split(path.sep).some((part) => part === "..")) {
+  if (input.split(/[\\/]/).some((part) => part === "..")) {
     throw new WorkspaceValidationError("workspace no puede contener segmentos '..'.");
   }
 

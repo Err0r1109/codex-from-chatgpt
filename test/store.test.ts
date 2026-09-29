@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { execFileSync } from "node:child_process";
 
 import { StateStore } from "../src/store.js";
 
@@ -29,18 +30,37 @@ test("state store usa escritura atómica y permisos 0600 incluso si el archivo a
   store.save([stateJob("job-1", "thread-1")]);
   chmodSync(file, 0o644);
   store.save([stateJob("job-1", "thread-1")]);
-  assert.equal(statSync(file).mode & 0o777, 0o600);
+  if (process.platform === "win32") {
+    const acl = execFileSync("icacls.exe", [file], { encoding: "utf8" });
+    assert.ok(!acl.includes("(I)"), "State must not inherit public ACLs");
+    assert.ok(acl.includes(process.env.USERNAME!));
+  } else assert.equal(statSync(file).mode & 0o777, 0o600);
 });
 
 test("state ambiguo con job_id o thread_id duplicados se rechaza completo", () => {
   const directory = mkdtempSync(path.join(tmpdir(), "codex-agent-state-"));
   const file = path.join(directory, "state.json");
-  writeFileSync(file, JSON.stringify({ version: 1, jobs: [stateJob("same", "thread-a"), stateJob("same", "thread-b")] }));
+  writeFileSync(
+    file,
+    JSON.stringify({
+      version: 1,
+      jobs: [stateJob("same", "thread-a"), stateJob("same", "thread-b")],
+    }),
+  );
   const store = new StateStore(file);
   assert.deepEqual(store.load(), []);
   assert.match(store.getDiagnostic() ?? "", /job_id duplicado/);
 
-  writeFileSync(file, JSON.stringify({ version: 1, jobs: [stateJob("job-a", "same-thread"), stateJob("job-b", "same-thread")] }));
+  writeFileSync(
+    file,
+    JSON.stringify({
+      version: 1,
+      jobs: [
+        stateJob("job-a", "same-thread"),
+        stateJob("job-b", "same-thread"),
+      ],
+    }),
+  );
   assert.deepEqual(store.load(), []);
   assert.match(store.getDiagnostic() ?? "", /thread_id duplicado/);
 });

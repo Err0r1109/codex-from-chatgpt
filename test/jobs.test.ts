@@ -644,9 +644,9 @@ test("thread/start incierto no adopta un thread por preview o timestamp", async 
 
 test("fallo de persistencia en listener se diagnostica sin tumbar el proceso", async () => {
   class FailingStore extends StateStore {
-    private saves = 0;
+    fail = false;
     override save(jobs: Parameters<StateStore["save"]>[0]): void {
-      if (this.saves++ > 2) throw new Error("disco no disponible");
+      if (this.fail) throw new Error("disco no disponible");
       super.save(jobs);
     }
   }
@@ -654,6 +654,7 @@ test("fallo de persistencia en listener se diagnostica sin tumbar el proceso", a
   const fake = new FakeAppServer();
   const manager = new JobManager(fake, { store });
   const started = await manager.start(workspace, "persistencia");
+  store.fail = true;
   assert.doesNotThrow(() => fake.emit({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1", item: { type: "commandExecution", command: "pwd", status: "completed" } } }));
   assert.equal(manager.get(started.job_id).status, "recovery_required");
 });

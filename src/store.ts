@@ -1,9 +1,26 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  openSync,
+  closeSync,
+  fsyncSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  emptyEvents,
+  eventStateSchema,
+  type EventState,
+} from "./event-state.js";
+import { makePrivate } from "./private-files.js";
 
-export const STATE_VERSION = 1;
+export const STATE_VERSION = 2;
 
 export type PersistedJob = {
   job_id: string;
@@ -15,6 +32,11 @@ export type PersistedJob = {
   latest_diff: string | null;
   files_changed: string[];
   commands_executed: string[];
+  command_evidence?: Array<{
+    command: string;
+    status: string;
+    exit_code?: number;
+  }>;
   error: string | null;
   updated_at: string;
   /** Added in v0.2. Older state files omit this and migrate to revision 0. */
@@ -23,6 +45,13 @@ export type PersistedJob = {
   warnings?: string[];
   activity?: string | null;
   completion_report_injected?: boolean;
+  turn_count?: number;
+  requests?: Record<
+    string,
+    { hash: string; turn_id: string | null; previous_turn_id?: string | null }
+  >;
+  stopped?: boolean;
+  deadline?: number | null;
 };
 
 export type PersistedValidation = {
@@ -36,6 +65,7 @@ export type PersistedValidation = {
 type PersistedState = {
   version: number;
   jobs: PersistedJob[];
+  events?: EventState;
 };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -53,10 +83,15 @@ function optionalNullableString(value: unknown): boolean {
 function validValidation(value: unknown): value is PersistedValidation {
   if (!isObject(value)) return false;
   return (
-    typeof value.kind === "string" && value.kind.length > 0 &&
-    typeof value.command === "string" && value.command.length > 0 &&
-    typeof value.status === "string" && value.status.length > 0 &&
-    (value.exit_code === undefined || typeof value.exit_code === "number" && Number.isInteger(value.exit_code)) &&
+    typeof value.kind === "string" &&
+    value.kind.length > 0 &&
+    typeof value.command === "string" &&
+    value.command.length > 0 &&
+    typeof value.status === "string" &&
+    value.status.length > 0 &&
+    (value.exit_code === undefined ||
+      (typeof value.exit_code === "number" &&
+        Number.isInteger(value.exit_code))) &&
     (value.output_tail === undefined || typeof value.output_tail === "string")
   );
 }
@@ -64,22 +99,51 @@ function validValidation(value: unknown): value is PersistedValidation {
 function validJob(value: unknown): value is PersistedJob {
   if (!isObject(value)) return false;
   return (
-    typeof value.job_id === "string" && value.job_id.length > 0 &&
-    (value.thread_id === null || typeof value.thread_id === "string" && value.thread_id.length > 0) &&
-    typeof value.workspace === "string" && value.workspace.length > 0 &&
+    typeof value.job_id === "string" &&
+    value.job_id.length > 0 &&
+    (value.thread_id === null ||
+      (typeof value.thread_id === "string" && value.thread_id.length > 0)) &&
+    typeof value.workspace === "string" &&
+    value.workspace.length > 0 &&
     (value.turn_id === null || typeof value.turn_id === "string") &&
     typeof value.status === "string" &&
     nullableString(value.final_message) === value.final_message &&
     nullableString(value.latest_diff) === value.latest_diff &&
-    Array.isArray(value.files_changed) && value.files_changed.every((item) => typeof item === "string") &&
-    Array.isArray(value.commands_executed) && value.commands_executed.every((item) => typeof item === "string") &&
+    Array.isArray(value.files_changed) &&
+    value.files_changed.every((item) => typeof item === "string") &&
+    Array.isArray(value.commands_executed) &&
+    value.commands_executed.every((item) => typeof item === "string") &&
     nullableString(value.error) === value.error &&
     typeof value.updated_at === "string" &&
-    (value.revision === undefined || typeof value.revision === "number" && Number.isInteger(value.revision) && value.revision >= 0) &&
-    (value.validation === undefined || Array.isArray(value.validation) && value.validation.every(validValidation)) &&
-    (value.warnings === undefined || Array.isArray(value.warnings) && value.warnings.every((item) => typeof item === "string")) &&
+    (value.revision === undefined ||
+      (typeof value.revision === "number" &&
+        Number.isInteger(value.revision) &&
+        value.revision >= 0)) &&
+    (value.validation === undefined ||
+      (Array.isArray(value.validation) &&
+        value.validation.every(validValidation))) &&
+    (value.warnings === undefined ||
+      (Array.isArray(value.warnings) &&
+        value.warnings.every((item) => typeof item === "string"))) &&
     optionalNullableString(value.activity) &&
-    (value.completion_report_injected === undefined || typeof value.completion_report_injected === "boolean")
+    (value.completion_report_injected === undefined ||
+      typeof value.completion_report_injected === "boolean") &&
+    (value.turn_count === undefined ||
+      (Number.isInteger(value.turn_count) && Number(value.turn_count) >= 0)) &&
+    (value.stopped === undefined || typeof value.stopped === "boolean") &&
+    (value.deadline === undefined ||
+      value.deadline === null ||
+      (typeof value.deadline === "number" &&
+        Number.isFinite(value.deadline))) &&
+    (value.requests === undefined ||
+      (isObject(value.requests) &&
+        Object.values(value.requests).every(
+          (r) =>
+            isObject(r) &&
+            typeof r.hash === "string" &&
+            (r.turn_id === null || typeof r.turn_id === "string") &&
+            optionalNullableString(r.previous_turn_id),
+        )))
   );
 }
 
@@ -91,10 +155,14 @@ function assertUnambiguousJobs(jobs: PersistedJob[]): void {
   const jobIds = new Set<string>();
   const threadIds = new Set<string>();
   for (const job of jobs) {
-    if (jobIds.has(job.job_id)) throw new Error(`state ambiguo: job_id duplicado (${job.job_id})`);
+    if (jobIds.has(job.job_id))
+      throw new Error(`state ambiguo: job_id duplicado (${job.job_id})`);
     jobIds.add(job.job_id);
     if (job.thread_id !== null) {
-      if (threadIds.has(job.thread_id)) throw new Error(`state ambiguo: thread_id duplicado (${job.thread_id})`);
+      if (threadIds.has(job.thread_id))
+        throw new Error(
+          `state ambiguo: thread_id duplicado (${job.thread_id})`,
+        );
       threadIds.add(job.thread_id);
     }
   }
@@ -107,8 +175,26 @@ export function defaultStateFile(): string {
 export class StateStore {
   readonly filePath: string;
   private diagnostic: string | null = null;
+  private jobs: PersistedJob[] = [];
+  private events: EventState = emptyEvents();
+  private readonly listeners = new Set<() => void>();
 
-  constructor(filePath = process.env.CODEX_AGENT_STATE_FILE ?? defaultStateFile()) {
+  eventState(): EventState {
+    return structuredClone(this.events);
+  }
+  onCommit(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  updateEvents(change: (state: EventState) => void): void {
+    const next = this.eventState();
+    change(next);
+    this.publish(this.jobs, next);
+  }
+
+  constructor(
+    filePath = process.env.CODEX_AGENT_STATE_FILE ?? defaultStateFile(),
+  ) {
     this.filePath = path.resolve(filePath);
   }
 
@@ -129,14 +215,27 @@ export class StateStore {
 
     try {
       const parsed: unknown = JSON.parse(raw);
-      if (!isObject(parsed) || parsed.version !== STATE_VERSION || !Array.isArray(parsed.jobs)) {
-        throw new Error(`versión o forma no soportada (se esperaba version=${STATE_VERSION})`);
+      if (
+        !isObject(parsed) ||
+        ![1, STATE_VERSION].includes(Number(parsed.version)) ||
+        !Array.isArray(parsed.jobs)
+      ) {
+        throw new Error(
+          `versión o forma no soportada (se esperaba version=${STATE_VERSION})`,
+        );
       }
       const jobs = parsed.jobs.filter(validJob);
       if (jobs.length !== parsed.jobs.length) {
-        throw new Error("uno o más jobs persistidos no tienen un schema válido");
+        throw new Error(
+          "uno o más jobs persistidos no tienen un schema válido",
+        );
       }
       assertUnambiguousJobs(jobs);
+      this.events =
+        parsed.version === 1
+          ? emptyEvents()
+          : eventStateSchema.parse(parsed.events);
+      this.jobs = jobs;
       return jobs;
     } catch (error) {
       this.diagnostic = `State local corrupto o incompatible en ${this.filePath}: ${error instanceof Error ? error.message : String(error)}`;
@@ -145,25 +244,104 @@ export class StateStore {
   }
 
   save(jobs: PersistedJob[]): void {
+    if (this.diagnostic)
+      throw new Error("Refusing to overwrite unreadable state");
+    const next = this.eventState();
+    const reasons: Record<string, string> = {
+      completed: "turn_completed",
+      awaiting_approval: "approval_required",
+      input_required: "input_required",
+      failed: "failed",
+      interrupted: "interrupted",
+      recovery_required: "recovery_required",
+      limit_reached: "limit_reached",
+    };
+    for (const job of jobs) {
+      const key = JSON.stringify([
+        job.status,
+        job.turn_id,
+        job.status === "awaiting_approval" ? job.revision : null,
+      ]);
+      if (next.transitions[job.job_id] === key) continue;
+      next.transitions[job.job_id] = key;
+      const reason = reasons[job.status];
+      if (!reason) continue;
+      const event = {
+        eventId: `evt_${randomUUID()}`,
+        name: "codex.task_changed" as const,
+        timestamp: new Date().toISOString(),
+        cursor: null,
+        data: {
+          task_id: job.job_id,
+          revision: job.revision ?? 0,
+          status: job.status,
+          reason,
+          ...(job.turn_id ? { turn_id: job.turn_id } : {}),
+        },
+      };
+      for (const sub of next.subscriptions.filter(
+        (s) => s.taskId === job.job_id && s.expiresAt > Date.now(),
+      )) {
+        next.outbox.push({
+          subscriptionId: sub.id,
+          event,
+          attempts: 0,
+          nextAttempt: Date.now(),
+          state: "pending",
+        });
+      }
+    }
+    this.publish(jobs, next);
+  }
+
+  private publish(jobs: PersistedJob[], events: EventState): void {
+    if (this.diagnostic)
+      throw new Error("Refusing to overwrite unreadable state");
     const directory = path.dirname(this.filePath);
     mkdirSync(directory, { recursive: true });
+    makePrivate(directory, true);
     try {
       if (!statSync(directory).isDirectory()) {
         throw new Error("la ruta de state no es un directorio");
       }
     } catch (error) {
-      throw new Error(`No se puede preparar el state local: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(
+        `No se puede preparar el state local: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
 
-    const payload: PersistedState = { version: STATE_VERSION, jobs };
+    const payload: PersistedState = { version: STATE_VERSION, jobs, events };
     assertUnambiguousJobs(jobs);
-    const temporary = path.join(directory, `.${path.basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`);
+    const temporary = path.join(
+      directory,
+      `.${path.basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`,
+    );
     try {
-      writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      if (process.platform === "win32") makePrivate(temporary);
+      const fd = openSync(temporary, "r+");
+      try {
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
       renameSync(temporary, this.filePath);
+      if (process.platform !== "win32") {
+        const dir = openSync(directory, "r");
+        try {
+          fsyncSync(dir);
+        } finally {
+          closeSync(dir);
+        }
+      }
       // chmod is intentional even after replacement: it also repairs an existing
       // state file that had been created with broader permissions.
       chmodSync(this.filePath, 0o600);
+      this.jobs = structuredClone(jobs);
+      this.events = structuredClone(events);
     } catch (error) {
       try {
         // Best effort only; the original state remains untouched if rename failed.
@@ -171,7 +349,10 @@ export class StateStore {
       } catch {
         // Ignore cleanup failure and preserve the original diagnostic.
       }
-      throw new Error(`No se pudo publicar el state local atómicamente: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(
+        `No se pudo publicar el state local atómicamente: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
+    for (const listener of this.listeners) listener();
   }
 }

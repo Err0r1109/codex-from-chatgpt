@@ -1,6 +1,6 @@
 {
   "name": "codex-from-chatgpt",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "description": "Personal MCP bridge for using local Codex from ChatGPT",
   "license": "MIT",
@@ -13,24 +13,28 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
     "dev": "tsx src/index.ts",
-    "test": "tsx --test test/*.test.ts",
+    "test": "node scripts/test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/node": "2.1.0",
+    "@modelcontextprotocol/server": "2.2.0",
+    "ipaddr.js": "2.5.0",
+    "standardwebhooks": "1.1.1",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.2.0",
     "@types/node": "26.2.0",
     "tsx": "4.23.11",
     "typescript": "7.0.2"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/joseanu/codex-from-chatgpt.git"
+    "url": "git+https://github.com/Err0r1109/codex-from-chatgpt.git"
   },
-  "homepage": "https://github.com/joseanu/codex-from-chatgpt#readme",
+  "homepage": "https://github.com/Err0r1109/codex-from-chatgpt#readme",
   "bugs": {
-    "url": "https://github.com/joseanu/codex-from-chatgpt/issues"
+    "url": "https://github.com/Err0r1109/codex-from-chatgpt/issues"
   }
 }
