@@ -103,22 +103,93 @@ test("happy path start -> completed keeps a compact summary", async () => {
   assert.equal(snapshot.latest_diff, "diff --git a/a b/a");
 });
 
-test("wait holds a running task until attention or bounded timeout", async () => {
-  const { fake, manager } = managerFixture();
-  const started = await manager.start(workspace, "espera a que termine");
-  const waiting = manager.wait(started.job_id, 1_000);
-  setTimeout(() => completed(fake), 50);
-  const finished = await waiting;
-  assert.equal(finished.status, "completed");
-  assert.equal(finished.wait_timed_out, false);
-  assert.ok(finished.waited_ms >= 0);
-
-  const second = managerFixture();
-  const running = await second.manager.start(workspace, "sigue trabajando");
-  const timedOut = await second.manager.wait(running.job_id, 250);
-  assert.equal(timedOut.status, "running");
+test("wait times out without polling or mutating revision", async () => {
+  const { manager } = managerFixture();
+  const ready = await manager.create(workspace);
+  const before = manager.get(ready.job_id, { detail: "compact" });
+  const timedOut = await manager.wait(ready.job_id, before.revision, 100);
+  assert.equal(timedOut.status, "ready");
   assert.equal(timedOut.wait_timed_out, true);
-  assert.ok(timedOut.waited_ms >= 250);
+  assert.ok(timedOut.waited_ms >= 100);
+  assert.equal(manager.get(ready.job_id, { detail: "compact" }).revision, before.revision);
+});
+
+test("wait wakes on supervisory revision change", async () => {
+  const { fake, manager } = managerFixture();
+  const started = await manager.start(workspace, "espera un cambio");
+  const baseline = manager.get(started.job_id, { detail: "compact" });
+  const waiting = manager.wait(started.job_id, baseline.revision, 1_000);
+  setTimeout(
+    () =>
+      fake.emit({
+        method: "item/started",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "commandExecution",
+            id: "build",
+            command: "npm run build",
+            status: "inProgress",
+          },
+        },
+      }),
+    25,
+  );
+  const changed = await waiting;
+  assert.equal(changed.wait_timed_out, false);
+  assert.ok(changed.revision > baseline.revision);
+  assert.equal(changed.activity, "Running build");
+});
+
+test("wait wakes all simultaneous waiters and attention states", async () => {
+  const { fake, manager } = managerFixture();
+  const started = await manager.start(workspace, "espera aprobación");
+  const baseline = manager.get(started.job_id, { detail: "compact" });
+  const first = manager.wait(started.job_id, baseline.revision, 1_000);
+  const second = manager.wait(started.job_id, baseline.revision, 1_000);
+  setTimeout(
+    () =>
+      fake.emit({
+        id: 77,
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "approval-77",
+          command: "npm test",
+          cwd: workspace,
+        },
+      }),
+    25,
+  );
+  const [one, two] = await Promise.all([first, second]);
+  for (const result of [one, two]) {
+    assert.equal(result.status, "awaiting_approval");
+    assert.equal(result.wait_timed_out, false);
+    assert.ok(result.revision > baseline.revision);
+  }
+  const immediate = await manager.wait(started.job_id, one.revision, 1_000);
+  assert.equal(immediate.status, "awaiting_approval");
+  assert.equal(immediate.wait_timed_out, false);
+});
+
+test("wait validates revision and timeout bounds", async () => {
+  const { manager } = managerFixture();
+  const ready = await manager.create(workspace);
+  const current = manager.get(ready.job_id, { detail: "compact" });
+  await assert.rejects(
+    manager.wait(ready.job_id, current.revision + 1, 100),
+    /since_revision .*no puede ser mayor/,
+  );
+  await assert.rejects(
+    manager.wait(ready.job_id, current.revision, 99),
+    /between 100 and 45000/,
+  );
+  await assert.rejects(
+    manager.wait(ready.job_id, current.revision, 45_001),
+    /between 100 and 45000/,
+  );
 });
 
 test("codex_get detail modes keep standard supervisory data separate from debug data", async () => {

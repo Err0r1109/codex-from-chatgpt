@@ -31,12 +31,12 @@ export function createMcpServer(
   // Events is the documented OpenAI draft extension, not yet in SDK capability types.
   const capabilities = { tools: {}, events: {} };
   const server = new McpServer(
-    { name: "Codex MCP Bridge", version: "0.5.1" },
+    { name: "Codex MCP Bridge", version: "0.5.2" },
     {
       capabilities,
       supportedProtocolVersions: ["2026-07-28"],
       instructions:
-        "Prefer MCP Events: create a task, subscribe to codex.task_changed, then submit. If this ChatGPT host cannot subscribe to Events, keep the same Work response active and use codex_task_wait repeatedly until Codex completes or needs attention; then read evidence and submit the next turn. Never require the user to relay Codex output. Codex approvals require the local operator.",
+        "Prefer MCP Events: create a task, subscribe to codex.task_changed, then submit. If this ChatGPT host cannot subscribe to Events, keep the same Work response active and use codex_task_wait with the last observed revision until Codex completes or needs attention; on timeout, wait again using the returned revision. Then read evidence and submit the next turn. Never require the user to relay Codex output. Codex approvals require the local operator.",
     },
   );
   const task_id = z.string().uuid();
@@ -121,11 +121,12 @@ export function createMcpServer(
     "codex_task_wait",
     {
       description:
-        "Fallback for ChatGPT hosts without MCP Events. Wait read-only for up to 20 seconds until this task becomes ready, completes, fails, needs approval/input, or otherwise requires attention. If wait_timed_out=true, call it again in the SAME ChatGPT response. Do not ask the user to relay status.",
+        "Fallback for ChatGPT hosts without MCP Events. Wait read-only for this task's supervisory revision to advance, or for completion/attention, without polling Codex. If wait_timed_out=true, call it again in the SAME ChatGPT response using the returned revision.",
       inputSchema: z
         .object({
           task_id,
-          timeout_ms: z.number().int().min(250).max(20_000).default(15_000),
+          since_revision: z.number().int().nonnegative(),
+          timeout_ms: z.number().int().min(100).max(45_000).default(30_000),
         })
         .strict(),
       annotations: {
@@ -138,7 +139,7 @@ export function createMcpServer(
     (p) =>
       call(async () => {
         await manager.authorizeTask(p.task_id);
-        return manager.wait(p.task_id, p.timeout_ms);
+        return manager.wait(p.task_id, p.since_revision, p.timeout_ms);
       }),
   );
   server.registerTool(

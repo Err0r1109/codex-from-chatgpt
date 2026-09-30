@@ -1,4 +1,6 @@
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import net from "node:net";
+import path from "node:path";
 
 export const SERVICE_NAME = "Codex Agent";
 export const DEFAULT_HOST = "127.0.0.1";
@@ -63,6 +65,93 @@ export function allowedHosts(host: string, port: number, env: NodeJS.ProcessEnv 
   return [...hosts];
 }
 
+function isFile(file: string): boolean {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function windowsPathEqual(a: string, b: string): boolean {
+  return path.win32.resolve(a).toLowerCase() === path.win32.resolve(b).toLowerCase();
+}
+
+function insideWindowsRoot(root: string, candidate: string): boolean {
+  const relative = path.win32.relative(path.win32.resolve(root), path.win32.resolve(candidate));
+  return relative === "" || (!relative.startsWith("..\\") && relative !== ".." && !path.win32.isAbsolute(relative));
+}
+
+function codexCliFromUserConfig(env: NodeJS.ProcessEnv): string | null {
+  const home =
+    env.CODEX_HOME?.trim() ||
+    (env.USERPROFILE ? path.win32.join(env.USERPROFILE, ".codex") : "");
+  if (!home) return null;
+  const configFile = path.win32.join(home, "config.toml");
+  if (!existsSync(configFile)) return null;
+  let text: string;
+  try {
+    text = readFileSync(configFile, "utf8");
+  } catch {
+    return null;
+  }
+  const match = text.match(/^\s*CODEX_CLI_PATH\s*=\s*(['"])(.*?)\1\s*$/m);
+  if (!match?.[2]) return null;
+  return match[1] === '"' ? match[2].replace(/\\\\/g, "\\") : match[2];
+}
+
+function officialWindowsCodexCandidates(env: NodeJS.ProcessEnv): string[] {
+  if (!env.LOCALAPPDATA) return [];
+  const root = path.win32.join(env.LOCALAPPDATA, "OpenAI", "Codex", "bin");
+  if (!existsSync(root)) return [];
+  const candidates: string[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const directory = path.win32.join(root, entry.name);
+    const cli = path.win32.join(directory, "codex.exe");
+    const host = path.win32.join(directory, "codex-code-mode-host.exe");
+    if (isFile(cli) && isFile(host)) candidates.push(cli);
+  }
+  return candidates.sort((a, b) => a.localeCompare(b));
+}
+
+export function resolveCodexCommand(
+  env: NodeJS.ProcessEnv = process.env,
+  platform = process.platform,
+): string {
+  const explicit = env.CODEX_BIN?.trim();
+  if (platform !== "win32") return explicit || "codex";
+
+  const officialRoot = env.LOCALAPPDATA
+    ? path.win32.join(env.LOCALAPPDATA, "OpenAI", "Codex", "bin")
+    : null;
+  const configured = codexCliFromUserConfig(env);
+  const configuredValid = configured && isFile(configured) ? configured : null;
+
+  if (explicit && isFile(explicit)) {
+    const isOfficial = officialRoot ? insideWindowsRoot(officialRoot, explicit) : false;
+    if (!isOfficial) return explicit;
+
+    const host = path.win32.join(path.win32.dirname(explicit), "codex-code-mode-host.exe");
+    const staleAgainstConfig =
+      configuredValid !== null && !windowsPathEqual(explicit, configuredValid);
+    if (isFile(host) && !staleAgainstConfig) return explicit;
+    if (configuredValid) return configuredValid;
+  }
+
+  if (configuredValid) return configuredValid;
+
+  const candidates = officialWindowsCodexCandidates(env);
+  if (candidates.length === 1) return candidates[0]!;
+  if (candidates.length > 1)
+    throw new Error(
+      "Ambiguous official Codex runtime: multiple complete installations found and no current CODEX_CLI_PATH disambiguates them.",
+    );
+  if (explicit)
+    throw new Error(`Configured CODEX_BIN is unavailable or stale: ${explicit}`);
+  return "codex";
+}
+
 export function runtimeConfig(env: NodeJS.ProcessEnv = process.env): {
   host: string;
   port: number;
@@ -91,7 +180,7 @@ export function runtimeConfig(env: NodeJS.ProcessEnv = process.env): {
     host,
     port,
     allowedHosts: allowedHosts(host, port, env),
-    codexCommand: env.CODEX_BIN ?? "codex",
+    codexCommand: resolveCodexCommand(env),
     rpcTimeoutMs: parseDuration("CODEX_RPC_TIMEOUT_MS", 30_000),
     shutdownTimeoutMs: parseDuration("CODEX_SHUTDOWN_TIMEOUT_MS", 2_000),
     stateFile: env.CODEX_AGENT_STATE_FILE,

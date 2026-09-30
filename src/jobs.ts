@@ -629,7 +629,6 @@ function isActiveStatus(status: JobStatus): boolean {
 
 function isWaitBoundaryStatus(status: JobStatus): boolean {
   return (
-    status === "ready" ||
     status === "input_required" ||
     status === "awaiting_approval" ||
     status === "completed" ||
@@ -744,6 +743,7 @@ export class JobManager {
   private readonly turnTimeoutMs: number;
   private readonly deadlines = new Map<string, NodeJS.Timeout>();
   private readonly loadedThreads = new Set<string>();
+  private readonly waiters = new Map<string, Set<() => void>>();
   private readonly inputs = new Map<
     string,
     { id: JsonRpcId; params: JsonObject }
@@ -1147,36 +1147,72 @@ export class JobManager {
 
   async wait(
     jobId: string,
-    timeoutMs = 15_000,
+    sinceRevision: number,
+    timeoutMs = 30_000,
   ): Promise<JobSnapshot & { wait_timed_out: boolean; waited_ms: number }> {
+    if (!Number.isInteger(sinceRevision) || sinceRevision < 0)
+      throw new Error("since_revision must be a non-negative integer");
     if (
       !Number.isInteger(timeoutMs) ||
-      timeoutMs < 250 ||
-      timeoutMs > 20_000
+      timeoutMs < 100 ||
+      timeoutMs > 45_000
     )
-      throw new Error("timeout_ms must be an integer between 250 and 20000");
+      throw new Error("timeout_ms must be an integer between 100 and 45000");
+
     const started = Date.now();
-    while (true) {
-      const snapshot = this.get(jobId, { detail: "compact" });
-      if (isWaitBoundaryStatus(snapshot.status) || snapshot.stopped) {
-        return {
-          ...snapshot,
-          wait_timed_out: false,
-          waited_ms: Date.now() - started,
-        };
-      }
-      const elapsed = Date.now() - started;
-      if (elapsed >= timeoutMs) {
-        return {
-          ...snapshot,
-          wait_timed_out: true,
-          waited_ms: elapsed,
-        };
-      }
-      await new Promise<void>((resolve) =>
-        setTimeout(resolve, Math.min(250, timeoutMs - elapsed)),
+    const initial = this.get(jobId, { detail: "compact" });
+    if (sinceRevision > initial.revision)
+      throw new Error(
+        `since_revision (${sinceRevision}) no puede ser mayor que la revision actual (${initial.revision}).`,
       );
+    if (
+      initial.revision > sinceRevision ||
+      isWaitBoundaryStatus(initial.status) ||
+      initial.stopped
+    ) {
+      return {
+        ...initial,
+        wait_timed_out: false,
+        waited_ms: Date.now() - started,
+      };
     }
+
+    return await new Promise((resolve) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      let wake!: () => void;
+
+      const finish = (timedOut: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        const currentWaiters = this.waiters.get(jobId);
+        currentWaiters?.delete(wake);
+        if (currentWaiters?.size === 0) this.waiters.delete(jobId);
+        resolve({
+          ...this.get(jobId, { detail: "compact" }),
+          wait_timed_out: timedOut,
+          waited_ms: Date.now() - started,
+        });
+      };
+
+      wake = () => finish(false);
+      const currentWaiters = this.waiters.get(jobId) ?? new Set<() => void>();
+      currentWaiters.add(wake);
+      this.waiters.set(jobId, currentWaiters);
+
+      // Close the check/register race without polling.
+      const afterRegistration = this.get(jobId, { detail: "compact" });
+      if (
+        afterRegistration.revision > sinceRevision ||
+        isWaitBoundaryStatus(afterRegistration.status) ||
+        afterRegistration.stopped
+      ) {
+        finish(false);
+        return;
+      }
+      timer = setTimeout(() => finish(true), timeoutMs);
+    });
   }
 
   get(jobId: string, options: JobGetOptions = {}): JobSnapshot {
@@ -1990,8 +2026,16 @@ export class JobManager {
     if (fingerprint !== job.revisionFingerprint) {
       job.revision += 1;
       job.revisionFingerprint = fingerprint;
+      this.notifyWaiters(job.jobId);
     }
     job.updatedAt = new Date().toISOString();
+  }
+
+  private notifyWaiters(jobId: string): void {
+    const waiters = this.waiters.get(jobId);
+    if (!waiters || waiters.size === 0) return;
+    this.waiters.delete(jobId);
+    for (const wake of waiters) wake();
   }
 
   private persist(_job: JobRecord, required = false): boolean {

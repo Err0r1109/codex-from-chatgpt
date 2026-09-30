@@ -342,6 +342,10 @@ test("modern discover, events/list, tools/call and create-subscribe-submit elimi
     "codex_task_wait",
     "codex_turn_submit",
   ]);
+  const waitTool = tools.find((x) => x.name === "codex_task_wait");
+  assert.equal(waitTool.annotations.readOnlyHint, true);
+  assert.equal(waitTool.annotations.idempotentHint, true);
+  assert.ok(waitTool.inputSchema.required.includes("since_revision"));
   assert.equal((await rpc("tools/call", { name: "codex_models_list", arguments: {} })).result.structuredContent.models[0].model, "fixture");
   const created = (
     await rpc("tools/call", {
@@ -353,10 +357,14 @@ test("modern discover, events/list, tools/call and create-subscribe-submit elimi
   assert.equal(f.fake.count, 0);
   const waited = await rpc("tools/call", {
     name: "codex_task_wait",
-    arguments: { task_id: created.task_id, timeout_ms: 250 },
+    arguments: {
+      task_id: created.task_id,
+      since_revision: created.revision,
+      timeout_ms: 100,
+    },
   });
   assert.equal(waited.result.structuredContent.status, "ready");
-  assert.equal(waited.result.structuredContent.wait_timed_out, false);
+  assert.equal(waited.result.structuredContent.wait_timed_out, true);
   const sub = subscription(created.task_id);
   assert.ok((await rpc("events/subscribe", sub)).result.id);
   const submitted = await rpc("tools/call", {

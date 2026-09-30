@@ -14,7 +14,7 @@ Fork of [joseanu/codex-from-chatgpt](https://github.com/joseanu/codex-from-chatg
 | `codex_task_create(workspace)`                                      | Validate an existing directory under the operator's root, durably prepare a task/thread, return `ready`. No turn starts.                                                  |
 | `codex_turn_submit(task_id, prompt, request_id, expected_revision)` | Start a turn on that thread and return after acceptance. Same ID and prompt never start another turn, including after restart. Different content under the same ID fails. |
 | `codex_task_get(task_id, detail?, since_revision?)`                 | Bounded compact, standard or debug evidence. Debug includes actual command statuses/exit codes.                                                                           |
-| `codex_task_wait(task_id, timeout_ms?)`                              | Read-only Work fallback when Events are unavailable. Waits up to 20 seconds for completion/attention; timeout means call it again in the same ChatGPT response.            |
+| `codex_task_wait(task_id, since_revision, timeout_ms?)`              | Read-only Work fallback when Events are unavailable. Waits without backend polling for a supervisory revision change or attention state; default 30 s, maximum 45 s.       |
 | `codex_task_stop(task_id)`                                          | Durably stop the task and interrupt its exact active turn. Later submissions are blocked.                                                                                 |
 
 Create → subscribe → submit. Both create and submit accept optional `model` and `reasoning_effort`. Choose model IDs from `codex_models_list`; exact display names and unambiguous single-word names also work. Ambiguous names fail. `minimum`/`maximum` select the lowest/highest advertised effort; unknown future effort labels require an exact selection. Every new submission revalidates against live `model/list`. No model list is hardcoded.
@@ -27,7 +27,7 @@ Task reads include durable `model_evidence` per turn: requested selection, resol
 
 `events/list`, `events/subscribe` and `events/unsubscribe` share `/mcp`. Event `codex.task_changed` takes `{ "task_id": "UUID" }`. Payload: task ID, revision, status, reason and optional turn ID; no prompt, transcript, instructions or diff.
 
-When the ChatGPT host does not expose the documented Events subscription capability, keep the same Work response alive after `codex_turn_submit` and call `codex_task_wait` with a bounded timeout until it returns a completion or attention state. A timeout is not a failure and does not consume another Codex turn: call the wait tool again. Once terminal, read `codex_task_get`, review the evidence, and submit the next turn with a fresh request ID and current revision. This fallback uses only ordinary supported MCP tool calls; it does not wake a conversation after its response has ended.
+When the ChatGPT host does not expose the documented Events subscription capability, keep the same Work response alive after `codex_turn_submit` and call `codex_task_wait(task_id, since_revision, timeout_ms?)`. The bridge registers an in-process waiter and wakes it when supervisory revision advances or the task reaches an approval/input/terminal state; it does not busy-poll Codex App Server. Use the returned revision for the next wait. A timeout is not a failure and consumes no Codex turn. Once terminal, read `codex_task_get`, review the evidence, and submit the next turn with a fresh request ID and current revision. This fallback uses only ordinary supported MCP tool calls; it does not wake a conversation after its response has ended.
 
 ## Run
 
@@ -61,7 +61,7 @@ For other installations, set these before `npm start`:
 | `CODEX_WORKSPACE_ROOT`        | Existing operator-authorized root; default `~/workspace`. Realpath rejects symlink/junction escapes. |
 | `CODEX_AGENT_STATE_FILE`      | `~/.codex-agent-mcp/state.json`; must be outside the workspace.                                      |
 | `HOST`, `PORT`                | `127.0.0.1`, `8787`; executable rejects non-loopback, including the old opt-in.                      |
-| `CODEX_BIN`                   | Installed Codex executable.                                                                          |
+| `CODEX_BIN`                   | Optional Codex executable. On Windows, stale official versioned paths are reconciled against the current official Codex runtime; ambiguous runtime selection fails closed. |
 | `CODEX_AGENT_MAX_TURNS`       | 8, operator-owned and persisted. Reaching it emits `limit_reached`; deliberate new task required.    |
 | `CODEX_AGENT_TURN_TIMEOUT_MS` | 1800000. Deadline requests interruption; uncertain terminal outcome becomes recovery-required.       |
 
