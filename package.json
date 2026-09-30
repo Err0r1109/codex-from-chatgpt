@@ -2,7 +2,7 @@
   "name": "codex-from-chatgpt",
   "version": "0.5.2",
   "private": true,
-  "description": "Personal MCP bridge for using local Codex from ChatGPT",
+  "description": "USER-OPT-IN ONLY Codex MCP Bridge. Never invoke Codex unless the user explicitly requests Codex for the current task.",
   "license": "MIT",
   "author": "Antonio Ulloa",
   "type": "module",

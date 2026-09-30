@@ -152,6 +152,24 @@ test("attach rejects active and invalid or unauthorized threads", async () => {
   await assert.rejects(manager.attach("existing"), /autorizada/);
 });
 
+test("create persists a client-attested explicit user authorization audit for the whole task", async () => {
+  const { fake, manager, store } = managerFixture();
+  const basis = "Use Codex to build this Android game.";
+  const task = await manager.create(workspace, {}, basis);
+  const created = manager.get(task.job_id!, {});
+  assert.equal(created.authorization?.user_authorized, true);
+  assert.equal(created.authorization?.basis, basis);
+  assert.equal(created.authorization?.source, "client-attested-explicit-user-opt-in");
+  assert.ok(created.authorization?.recorded_at);
+  assert.equal(store.load()[0]?.authorization?.basis, basis);
+
+  await manager.submit(task.job_id!, "first authorized turn", "auth-turn-1", task.revision);
+  completed(fake);
+  const after = manager.get(task.job_id!, {});
+  assert.equal(after.authorization?.basis, basis);
+  assert.equal(after.turn_count, 1);
+});
+
 test("wait times out without polling or mutating revision", async () => {
   const { manager } = managerFixture();
   const ready = await manager.create(workspace);

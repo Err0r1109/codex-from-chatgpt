@@ -2,6 +2,10 @@
 
 Private transport between ChatGPT (orchestrator/reviewer) and local Codex (programmer). The bridge contains no LLM and never chooses the next programming prompt.
 
+> **USER-OPT-IN ONLY.** Codex MCP Bridge belongs to the user, not to the assistant. ChatGPT must never invoke any bridge tool because Codex seems useful, the task is programming-related, complex, long, or suitable for delegation. Use is authorized only when the user explicitly instructs ChatGPT to use Codex for the current task. A coding request, a mention of Codex, a question about Codex, or past authorization is not permission. Once explicitly authorized, the bridge may be used autonomously for the whole resulting Codex task, including follow-up turns, testing and corrections, without additional opt-in prompts.
+
+See [USER_OPT_IN.md](docs/USER_OPT_IN.md) for the exact scope, acceptance examples and audit semantics.
+
 Fork of [joseanu/codex-from-chatgpt](https://github.com/joseanu/codex-from-chatgpt), originally authored by Antonio Ulloa. The upstream MIT [LICENSE](LICENSE) is retained. Keep the `upstream` Git remote.
 
 **Status:** the MCP 2.0 server, durable events and real Codex two-turn workflow are validated locally. The official tunnel is running. ChatGPT host-side `events/subscribe` is still unavailable in the tested Chat/Work surfaces, so true asynchronous wake-up remains unverified. The official-tool fallback `codex_task_wait` is live-validated in normal Chat as well as Work: one Chat response can complete multiple Codex turns on the same thread, review each result and submit the next automatically, with no user message or manual relay between turns. Normal Chat is the preferred fallback path; Work is optional for unusually long orchestration. See [validation evidence](docs/VALIDATION.md).

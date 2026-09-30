@@ -30,6 +30,12 @@ export type PersistedJob = {
   job_id: string;
   thread_id: string | null;
   workspace: string;
+  authorization?: {
+    user_authorized: true;
+    basis: string | null;
+    recorded_at: string;
+    source: "client-attested-explicit-user-opt-in";
+  };
   turn_id: string | null;
   status: string;
   final_message: string | null;
@@ -112,6 +118,13 @@ function validJob(value: unknown): value is PersistedJob {
       (typeof value.thread_id === "string" && value.thread_id.length > 0)) &&
     typeof value.workspace === "string" &&
     value.workspace.length > 0 &&
+    (value.authorization === undefined ||
+      (isObject(value.authorization) &&
+        value.authorization.user_authorized === true &&
+        optionalNullableString(value.authorization.basis) &&
+        typeof value.authorization.recorded_at === "string" &&
+        value.authorization.recorded_at.length > 0 &&
+        value.authorization.source === "client-attested-explicit-user-opt-in")) &&
     (value.turn_id === null || typeof value.turn_id === "string") &&
     typeof value.status === "string" &&
     nullableString(value.final_message) === value.final_message &&

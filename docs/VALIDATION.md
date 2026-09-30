@@ -1,5 +1,18 @@
 # Validation record
 
+## User-opt-in invocation contract, 2026-09-30
+
+Codex MCP Bridge is now explicitly **USER-OPT-IN ONLY** at the model-facing boundary. The MCP server instructions and every advertised Codex tool description begin with the same requirement: the assistant must not invoke Codex from inferred usefulness and may use it only when the user explicitly instructed it to use Codex for the current task. The create/attach descriptions add the stronger rule that a coding request, mention, discussion, suggestion, or question about Codex is not authorization.
+
+The server instructions encode the acceptance cases verbatim: “Build me an Android game.”, “Would Codex be good for building this Android game?”, and “We could probably use Codex for this.” are NOT AUTHORIZED; “Use Codex to build this Android game.” is AUTHORIZED for that task. Once opted in, create/attach, submit, wait/get, further turns, testing and corrections for that same task require no new opt-in. After that task ends, “Now make me another game.” is not authorized without a fresh explicit Codex instruction.
+
+`codex_task_create` and `codex_task_attach` accept optional `authorization_basis` audit text (maximum 500 characters). New tasks persist `user_authorized: true`, the basis or null, timestamp, and source `client-attested-explicit-user-opt-in`. This is intentionally documented as client-attested audit/debug evidence, not a cryptographic authorization boundary; the MCP server does not receive a trusted copy of the real conversation. Existing clients remain compatible because the audit excerpt is optional.
+
+ChatGPT permission settings were not changed. The policy preserves full task autonomy after explicit opt-in and adds no per-turn confirmation gate.
+
+Validation on the clean policy worktree passed TypeScript typecheck and build. The complete wrapper suite reported **91 tests: 90 passed, zero failed, one optional real-App-Server handshake skipped**. New coverage checks all six authorization acceptance cases, verifies that every advertised Codex tool is wired through the opt-in description prefix, and confirms that the client-attested authorization audit persists across a subsequent turn without requiring another authorization basis.
+
+
 ## Existing-thread attach and configurable development roots
 
 The bridge now lists bounded existing-thread metadata through `thread/list` with `useStateDbOnly: true`, filtering cwd through canonical authorized-root validation. `codex_task_attach` reads the exact requested thread and complete turn status, accepts only terminal history, persists ownership without starting inference, and preserves prior history for a subsequent same-thread resume. Historical count is separate from bridge `turn_count`. Configure multiple operator-owned roots with JSON `CODEX_WORKSPACE_ROOTS`; the single `CODEX_WORKSPACE_ROOT` remains the compatibility fallback.

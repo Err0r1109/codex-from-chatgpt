@@ -42,6 +42,25 @@ export type ApprovalDecision =
   | PermissionsRequestApprovalResponse
   | ReviewDecision;
 
+export type AuthorizationAudit = {
+  user_authorized: true;
+  basis: string | null;
+  recorded_at: string;
+  source: "client-attested-explicit-user-opt-in";
+};
+
+function authorizationAudit(basis?: string): AuthorizationAudit {
+  const trimmed = basis?.trim();
+  if (trimmed && trimmed.length > 500)
+    throw new Error("authorization_basis exceeds 500 characters");
+  return {
+    user_authorized: true,
+    basis: trimmed || null,
+    recorded_at: new Date().toISOString(),
+    source: "client-attested-explicit-user-opt-in",
+  };
+}
+
 type ApprovalKind = "command_execution" | "file_change" | "permissions";
 
 type PendingApproval = {
@@ -68,6 +87,7 @@ type JobRecord = {
   jobId: string;
   threadId: string | null;
   workspace: string;
+  authorization: AuthorizationAudit | null;
   turnId: string | null;
   status: JobStatus;
   finalMessage: string | null;
@@ -150,6 +170,7 @@ export type JobSnapshot = {
   task_id?: string;
   turn_count?: number;
   historical_turn_count?: number;
+  authorization?: AuthorizationAudit | null;
   recovery_required?: boolean;
   stopped?: boolean;
   status: JobStatus;
@@ -795,7 +816,7 @@ export class JobManager {
     return { models: await this.catalog.list() };
   }
 
-  async create(workspace: string, selection: Selection = {}): Promise<JobStartResult> {
+  async create(workspace: string, selection: Selection = {}, authorizationBasis?: string): Promise<JobStartResult> {
     const canonicalWorkspace = await validateWorkspace(workspace, this.workspaceRoots);
     const stateRelative = path.relative(
       canonicalWorkspace,
@@ -822,6 +843,7 @@ export class JobManager {
         jobId: randomUUID(),
         threadId: null,
         workspace: canonicalWorkspace,
+        authorization: authorizationAudit(authorizationBasis),
         turnId: null,
         status: "starting",
         finalMessage: null,
@@ -924,12 +946,19 @@ export class JobManager {
     return { threads, ...(typeof response.nextCursor === "string" ? { next_cursor: response.nextCursor } : {}) };
   }
 
-  async attach(threadId: string): Promise<JobStartResult & { historical_turn_count: number }> {
+  async attach(threadId: string, authorizationBasis?: string): Promise<JobStartResult & { historical_turn_count: number }> {
     return this.withExclusive(async () => {
       await this.ensureReady();
       this.assertNoActiveTurn();
       const existingId = this.jobsByThread.get(threadId);
-      if (existingId) return { ...this.startResult(this.getJob(existingId)), historical_turn_count: this.getJob(existingId).historicalTurnCount };
+      if (existingId) {
+        const existing = this.getJob(existingId);
+        if (authorizationBasis?.trim()) {
+          existing.authorization = authorizationAudit(authorizationBasis);
+          this.persist(existing, true);
+        }
+        return { ...this.startResult(existing), historical_turn_count: existing.historicalTurnCount };
+      }
       await requireChatGPT(this.appServer);
       const read = await this.appServer.request<unknown>("thread/read", { threadId, includeTurns: true });
       const thread = isObject(read) && isObject(read.thread) ? read.thread : null;
@@ -942,6 +971,7 @@ export class JobManager {
       const job: JobRecord = {
         settings: null, historicalTurnCount: turns.length, modelEvidence: [], turnCount: 0, requests: {}, stopped: false,
         deadline: null, commandEvidence: [], jobId: randomUUID(), threadId, workspace,
+        authorization: authorizationAudit(authorizationBasis),
         turnId: latest && typeof latest.id === "string" ? latest.id : null, status: "ready",
         finalMessage: null, latestDiff: null, filesChanged: [], commandsExecuted: [], error: null,
         pendingApprovals: new Map(), lastAgentMessage: null, agentMessages: new Map(), revision: 0,
@@ -1517,6 +1547,7 @@ export class JobManager {
       jobId: value.job_id,
       threadId: value.thread_id,
       workspace: value.workspace,
+      authorization: value.authorization ?? null,
       turnId: value.turn_id,
       status,
       finalMessage: value.final_message,
@@ -2134,6 +2165,7 @@ export class JobManager {
       job_id: job.jobId,
       thread_id: job.threadId,
       workspace: job.workspace,
+      authorization: job.authorization ?? undefined,
       turn_id: job.turnId,
       status: job.status,
       final_message: job.finalMessage,
@@ -2259,6 +2291,7 @@ export class JobManager {
       task_id: job.jobId,
       turn_count: job.turnCount,
       historical_turn_count: job.historicalTurnCount,
+      authorization: job.authorization,
       recovery_required: job.status === "recovery_required",
       stopped: job.stopped,
     };
