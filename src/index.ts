@@ -19,6 +19,8 @@ import { EventService } from "./events.js";
 import { makePrivate } from "./private-files.js";
 import { startOperatorControl } from "./operator-control.js";
 
+import { BrowserWakeService } from "./browser-wake.js";
+import { StdioLbbClient } from "./lbb-client.js";
 import { requireChatGPT } from "./models.js";
 
 async function main() {
@@ -33,7 +35,7 @@ async function main() {
   writeFileSync(lock, String(process.pid));
   const childEnv = { ...process.env };
   for (const name of Object.keys(childEnv))
-    if (/API_KEY|TOKEN|SECRET|TUNNEL/i.test(name)) delete childEnv[name];
+    if (/API_KEY|TOKEN|SECRET|TUNNEL|OPERATOR|LBB|BROWSER_WAKE/i.test(name)) delete childEnv[name];
   const appServer = new CodexAppServer({
     command: config.codexCommand,
     rpcTimeoutMs: config.rpcTimeoutMs,
@@ -41,13 +43,23 @@ async function main() {
     spawnOptions: { env: childEnv, windowsHide: true },
   });
   let events: EventService | undefined;
+  let browserWake: BrowserWakeService | undefined;
   try {
     await appServer.start();
     await requireChatGPT(appServer);
     console.error("Codex worker: App Server default; authentication: ChatGPT");
-    const jobs = new JobManager(appServer, { store, workspaceRoots: config.workspaceRoots });
+    const jobs = new JobManager(appServer, { store, workspaceRoots: config.workspaceRoots, workspacePolicy: config.workspacePolicy, executionPolicy: config.executionPolicy, browserWakeEnabled: config.browserWakeEnabled });
     events = new EventService(store, (id) => jobs.authorizeTask(id));
     await jobs.initialize();
+    if (config.browserWakeEnabled) {
+      if (!config.lbbMcpPath || !path.isAbsolute(config.lbbMcpPath)) throw new Error("Browser wake requires operator-configured absolute CODEX_LBB_MCP_PATH");
+      browserWake = new BrowserWakeService(store, new StdioLbbClient(config.lbbMcpPath), {
+        paused: () => jobs.isWakePaused(), authorize: id => jobs.authorizeTask(id),
+        pin: (task, url) => jobs.pinBrowserConversation(task, url),
+        labels: config.browserWakeLabels,
+      });
+      jobs.bindWakeService(() => browserWake!.status());
+    }
     const handler = createBridgeHandler(jobs, events);
     const handleMcp = toNodeHandler(handler);
     const httpServer = createServer(async (req, res) => {
@@ -69,7 +81,7 @@ async function main() {
             "Content-Type": "application/json",
           });
           res.end(
-            JSON.stringify({ ok: true, ready, authentication: "chatgpt", protocol: "2026-07-28" }),
+            JSON.stringify({ ok: true, ready, authentication: "chatgpt", protocol: "2026-07-28", browser_wake: jobs.wakeStatus() }),
           );
         } else if (url.pathname === "/mcp") await handleMcp(req, res);
         else {
@@ -89,6 +101,7 @@ async function main() {
       if (closing) return;
       closing = true;
       events?.stop();
+      await browserWake?.stop();
       await operatorControl?.close();
       await handler.close();
       await appServer.stop();
@@ -174,9 +187,11 @@ async function main() {
       );
     }
     events.start();
+    browserWake?.start();
     console.error(`Codex MCP Bridge: http://${config.host}:${config.port}/mcp`);
   } catch (e) {
     events?.stop();
+    await browserWake?.stop();
     await appServer.stop();
     closeSync(lock);
     unlinkSync(lockFile);

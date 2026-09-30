@@ -22,7 +22,11 @@ import { makePrivate } from "./private-files.js";
 import type { Settings, TurnModelEvidence } from "./models.js";
 import { settingsSchema, evidenceSchema } from "./models.js";
 
-export const STATE_VERSION = 2;
+export const STATE_VERSION = 3;
+
+
+export { type WakeIntent } from "./wake-state.js";
+import { wakeSchema, conversationUrl, type WakeIntent } from "./wake-state.js";
 
 export type PersistedJob = {
   thread_settings?: Settings | null;
@@ -59,9 +63,10 @@ export type PersistedJob = {
   historical_turn_count?: number;
   requests?: Record<
     string,
-    { hash: string; hash_version?: 2; turn_id: string | null; previous_turn_id?: string | null }
+    { hash: string; hash_version?: 2 | 3; turn_id: string | null; previous_turn_id?: string | null; wake?: "browser" | "none" | "events" }
   >;
   stopped?: boolean;
+  wake?: { enabled: boolean; conversation_url: string | null; binding_marker: string };
   deadline?: number | null;
 };
 
@@ -77,6 +82,7 @@ type PersistedState = {
   version: number;
   jobs: PersistedJob[];
   events?: EventState;
+  wakes?: WakeIntent[];
 };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -153,6 +159,7 @@ function validJob(value: unknown): value is PersistedJob {
     (value.historical_turn_count === undefined ||
       (Number.isInteger(value.historical_turn_count) && Number(value.historical_turn_count) >= 0)) &&
     (value.stopped === undefined || typeof value.stopped === "boolean") &&
+    (value.wake === undefined || (isObject(value.wake) && typeof value.wake.enabled === "boolean" && optionalNullableString(value.wake.conversation_url) && typeof value.wake.binding_marker === "string" && /^CW-BIND-[0-9a-f-]{36}$/.test(value.wake.binding_marker) && (value.wake.conversation_url === null || typeof value.wake.conversation_url === "string" && conversationUrl.test(value.wake.conversation_url)))) &&
     (value.deadline === undefined ||
       value.deadline === null ||
       (typeof value.deadline === "number" &&
@@ -163,7 +170,8 @@ function validJob(value: unknown): value is PersistedJob {
           (r) =>
             isObject(r) &&
             typeof r.hash === "string" &&
-            (r.hash_version === undefined || r.hash_version === 2) &&
+            (r.hash_version === undefined || r.hash_version === 2 || r.hash_version === 3) &&
+            (r.wake === undefined || r.wake === "browser" || r.wake === "none" || r.wake === "events") &&
             (r.turn_id === null || typeof r.turn_id === "string") &&
             optionalNullableString(r.previous_turn_id),
         )))
@@ -197,10 +205,23 @@ export function defaultStateFile(): string {
 
 export class StateStore {
   readonly filePath: string;
+  private readonly enforcePrivateAcl: boolean;
   private diagnostic: string | null = null;
   private jobs: PersistedJob[] = [];
   private events: EventState = emptyEvents();
   private readonly listeners = new Set<() => void>();
+  private wakes: WakeIntent[] = [];
+
+  jobsSnapshot(): PersistedJob[] { return structuredClone(this.jobs); }
+  wakeIntents(): WakeIntent[] { return structuredClone(this.wakes); }
+  updateWake(id: string, change: (wake: WakeIntent) => void): void {
+    const next = this.wakes.map((wake) => structuredClone(wake));
+    const wake = next.find((entry) => entry.id === id);
+    if (!wake) throw new Error("Wake intent not found");
+    change(wake);
+    this.publish(this.jobs, this.eventState(), next);
+  }
+  hasActiveSubscription(taskId: string): boolean { return this.events.subscriptions.some((sub) => sub.taskId === taskId && sub.expiresAt > Date.now()); }
 
   eventState(): EventState {
     return structuredClone(this.events);
@@ -217,8 +238,12 @@ export class StateStore {
 
   constructor(
     filePath = process.env.CODEX_AGENT_STATE_FILE ?? defaultStateFile(),
+    options: { enforcePrivateAcl?: boolean } = {},
   ) {
     this.filePath = path.resolve(filePath);
+    // Runtime callers never disable this. The option exists so high-write unit
+    // fixtures can test state semantics without spawning icacls.exe per save.
+    this.enforcePrivateAcl = options.enforcePrivateAcl ?? true;
   }
 
   getDiagnostic(): string | null {
@@ -240,7 +265,7 @@ export class StateStore {
       const parsed: unknown = JSON.parse(raw);
       if (
         !isObject(parsed) ||
-        ![1, STATE_VERSION].includes(Number(parsed.version)) ||
+        typeof parsed.version !== "number" || ![1, 2, STATE_VERSION].includes(parsed.version) ||
         !Array.isArray(parsed.jobs)
       ) {
         throw new Error(
@@ -255,9 +280,11 @@ export class StateStore {
       }
       assertUnambiguousJobs(jobs);
       this.events =
-        parsed.version === 1
+        Number(parsed.version) === 1
           ? emptyEvents()
           : eventStateSchema.parse(parsed.events);
+      const wakes = Number(parsed.version) === 3 ? parsed.wakes : [];
+      this.wakes = wakeSchema.array().parse(wakes ?? []);
       this.jobs = jobs;
       return jobs;
     } catch (error) {
@@ -302,6 +329,8 @@ export class StateStore {
           ...(job.turn_id ? { turn_id: job.turn_id } : {}),
         },
       };
+      const selected = Object.values(job.requests ?? {}).find(r => r.turn_id === job.turn_id)?.wake;
+      if (selected === "browser" || selected === "none") continue;
       for (const sub of next.subscriptions.filter(
         (s) => s.taskId === job.job_id && s.expiresAt > Date.now(),
       )) {
@@ -314,15 +343,40 @@ export class StateStore {
         });
       }
     }
-    this.publish(jobs, next);
+    const wakes = this.wakeIntents();
+    for (const job of jobs) {
+      const reason = reasons[job.status];
+      if (!reason || !job.turn_id) continue;
+      const request = Object.values(job.requests ?? {}).find((entry) => entry.turn_id === job.turn_id);
+      const transport: "events" | "browser" = request?.wake === "events" ? "events" : "browser";
+      if (transport === "browser" && (request?.wake !== "browser" || !job.wake?.enabled)) continue;
+      const revisionSensitive = reason === "approval_required" || reason === "input_required";
+      if (wakes.some((wake) =>
+        wake.task_id === job.job_id &&
+        wake.turn_id === job.turn_id &&
+        wake.reason === reason &&
+        (!revisionSensitive || wake.revision === (job.revision ?? 0))
+      )) continue;
+      if (transport === "events" || job.stopped) continue;
+      wakes.push(wakeSchema.parse({ id: `wake_${randomUUID()}`, task_id: job.job_id, turn_id: job.turn_id, revision: job.revision ?? 0, reason, status: job.status, conversation_url: job.wake?.conversation_url ?? null, binding_marker: job.wake?.binding_marker ?? "", transport: "browser", state: "pending", stage: "queued", attempts: 0, operation_id: null, retry_at: Date.now(), deadline: Date.now() + 24 * 60 * 60 * 1000, created_at: new Date().toISOString(), actions: [], tab_creations: 0 }));
+    }
+    for (const wake of wakes) {
+      const job = jobs.find(j => j.job_id === wake.task_id);
+      if (!["delivered", "cancelled"].includes(wake.state) && (!job || job.stopped || !job.wake?.enabled || job.turn_id !== wake.turn_id || job.status !== wake.status)) {
+        if (wake.stage === "dispatched") {
+          wake.state = "uncertain"; wake.detail = "Already dispatched; reconcile acceptance only";
+        } else { wake.state = "cancelled"; wake.detail = "Stopped, disarmed or superseded"; }
+      }
+    }
+    this.publish(jobs, next, wakes);
   }
 
-  private publish(jobs: PersistedJob[], events: EventState): void {
+  private publish(jobs: PersistedJob[], events: EventState, wakes = this.wakeIntents()): void {
     if (this.diagnostic)
       throw new Error("Refusing to overwrite unreadable state");
     const directory = path.dirname(this.filePath);
     mkdirSync(directory, { recursive: true });
-    makePrivate(directory, true);
+    if (this.enforcePrivateAcl) makePrivate(directory, true);
     try {
       if (!statSync(directory).isDirectory()) {
         throw new Error("la ruta de state no es un directorio");
@@ -333,8 +387,9 @@ export class StateStore {
       );
     }
 
-    const payload: PersistedState = { version: STATE_VERSION, jobs, events };
+    const payload: PersistedState = { version: STATE_VERSION, jobs, events, wakes };
     assertUnambiguousJobs(jobs);
+    wakeSchema.array().parse(wakes);
     const temporary = path.join(
       directory,
       `.${path.basename(this.filePath)}.${process.pid}.${randomUUID()}.tmp`,
@@ -344,7 +399,7 @@ export class StateStore {
         encoding: "utf8",
         mode: 0o600,
       });
-      if (process.platform === "win32") makePrivate(temporary);
+      if (process.platform === "win32" && this.enforcePrivateAcl) makePrivate(temporary);
       const fd = openSync(temporary, "r+");
       try {
         fsyncSync(fd);
@@ -365,6 +420,7 @@ export class StateStore {
       chmodSync(this.filePath, 0o600);
       this.jobs = structuredClone(jobs);
       this.events = structuredClone(events);
+      this.wakes = structuredClone(wakes);
     } catch (error) {
       try {
         // Best effort only; the original state remains untouched if rename failed.

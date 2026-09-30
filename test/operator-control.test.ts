@@ -9,6 +9,8 @@ test("operator control is local, authenticated and dispatches exact actions", as
   let stopped = 0;
   const calls: unknown[] = [];
   const jobs = {
+    wakeStatus() { return { service: "blocked", pending: 0 }; },
+    setWakePaused() { return 0; },
     get(task: string, options: unknown) {
       calls.push(["inspect", task, options]);
       return { status: "ready", revision: 3, task_id: task };

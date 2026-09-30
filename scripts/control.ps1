@@ -1,6 +1,6 @@
 param(
   [Parameter(Position=0)]
-  [ValidateSet('status','inspect','approve','input','stop')]
+  [ValidateSet('status','inspect','approve','input','stop','wake_status','wake_pause','wake_resume')]
   [string]$Command = 'status',
   [Parameter(Position=1)]
   [string]$TaskId,

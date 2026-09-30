@@ -27,7 +27,7 @@ function configuredRoots(roots?: string | readonly string[]): string[] {
 }
 
 /** Resolves an existing directory under the canonical, administrative workspace root. */
-export async function validateWorkspace(input: string, rootInput?: string | readonly string[]): Promise<string> {
+export async function validateWorkspace(input: string, rootInput?: string | readonly string[] | null, privateStateFile?: string): Promise<string> {
   if (typeof input !== "string" || input.length === 0) {
     throw new WorkspaceValidationError("workspace debe ser una ruta no vacía.");
   }
@@ -41,7 +41,9 @@ export async function validateWorkspace(input: string, rootInput?: string | read
     throw new WorkspaceValidationError("workspace no puede contener segmentos '..'.");
   }
 
-  const rootInputValues = configuredRoots(rootInput);
+  if (rootInput !== null) configuredRoots(rootInput);
+  if (process.platform === "win32" && (/^(?:\\\\|\\\?\\|\\\.\\)/.test(input) || !/^[a-zA-Z]:[\\/]/.test(input)) && !input.split(/[\\/]/).some((part) => part === "..")) throw new WorkspaceValidationError("workspace cannot use UNC, device, or noncanonical drive paths");
+  const rootInputValues = rootInput === null ? [path.parse(path.resolve(input)).root] : configuredRoots(rootInput ?? undefined);
   let roots: string[];
   let candidate: string;
   try {
@@ -62,6 +64,11 @@ export async function validateWorkspace(input: string, rootInput?: string | read
   });
   if (!inside) {
     throw new WorkspaceValidationError(`workspace debe estar dentro de una raíz autorizada (${rootInputValues.join(", ")}): ${input}`);
+  }
+  if (privateStateFile) {
+    const privateDir = await realpath(path.dirname(privateStateFile));
+    const contains = (a: string, b: string) => { const r = path.relative(a, b); return r === "" || (!r.startsWith(`..${path.sep}`) && r !== ".." && !path.isAbsolute(r)); };
+    if (contains(candidate, privateDir) || contains(privateDir, candidate)) throw new WorkspaceValidationError("workspace contains the private bridge state directory");
   }
   return candidate;
 }

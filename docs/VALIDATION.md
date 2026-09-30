@@ -139,3 +139,24 @@ The same fallback was then exercised in **normal Chat mode**, not Work. A single
 Turn one wrote exactly `CHATOK` plus LF to `chat-one.txt` after a real 8-second shell wait. Chat used `codex_task_wait`, reviewed the first completion with one `codex_task_get`, and automatically submitted turn two on the same task/thread. Turn two preserved the first file, wrote exactly `CHATOK-SECOND` plus LF to `chat-two.txt`, waited 5 seconds, and verified both files byte-for-byte with exit code 0. Independent filesystem read-back confirmed both exact contents.
 
 Therefore **normal Chat is the preferred fallback orchestration surface**. Work is not required for the no-copy/paste multi-turn loop and should be reserved only for cases where a substantially longer-lived orchestration run is desirable. The limitation remains only that the Chat response must stay active; there is still no out-of-run wake-up until host-side MCP Events subscription becomes available.
+
+## Browser wake sentinel fallback, 2026-09-30
+
+The browser-wake fallback is implemented as a deterministic local service with no LLM and no separately billed model API. A Codex turn can persist a browser wake intent atomically with the task transition; after Codex reaches completion/attention state, the supervised sender uses the existing Local Browser Bridge MCP client to locate the bound ChatGPT conversation and post a fixed wake message. The wake message instructs ChatGPT to read `codex_task_get` and explicitly states that it is not new Codex authorization. MCP Events remain preferred when host-side subscription becomes available; `codex_task_wait` remains a short-run fallback.
+
+The outbox persists wake state, stage, retries, deterministic action IDs, LBB receipts, owned-tab provenance, canonical conversation binding and deadline. Unknown browser effects are reconciled through `browser_operation` and are never blindly replayed. The sender fails closed on ambiguous search results, nonempty user drafts, incomplete semantic evidence, wrong conversation URL, busy ChatGPT state, lost provenance, browser-session changes, stop/disarm/newer-turn races, and uncertain send outcomes. Chrome/LBB unavailability leaves delivery pending without consuming the bounded dispatch-attempt budget. Browser wake is disabled by default and requires operator configuration; pause/resume/status are exposed only through the loopback authenticated operator control.
+
+The same change adds operator-owned `workspacePolicy: explicit` and `executionPolicy: danger-full-access`. Explicit workspace mode accepts a canonical existing local project directory without maintaining a project allowlist while excluding the bridge's private state directory and its ancestors/descendants. Danger-full-access maps documented App Server thread/resume/turn fields to full access with `approvalPolicy: never`; it is local configuration and does not alter ChatGPT plugin permissions or weaken the USER-OPT-IN invocation contract.
+
+Validation evidence:
+
+- TypeScript typecheck: passed.
+- Build: passed.
+- Dedicated browser-wake suite: **43/43 passed**.
+- Complete wrapper suite: **151 tests: 150 passed, zero failed, one optional real-App-Server handshake skipped**.
+- `git diff --check`: passed.
+- Live read-only Local Browser Bridge MCP connection from the new `StdioLbbClient`: `connected=true`, `mode=action`, build mismatch false, 21 public tools.
+- Production state was checked before deployment work: state version 2 and no nonterminal Codex tasks.
+- No Codex worker/model turn was invoked to implement or validate this sentinel change.
+
+This section records deterministic/unit/integration readiness only. The final acceptance still requires a real ChatGPT conversation to end its response, Codex to complete later, the local sentinel to post a new wake message into that same conversation, and a fresh ChatGPT run to resume orchestration without an intermediate human message.

@@ -48,7 +48,7 @@ export function createMcpServer(
       capabilities,
       supportedProtocolVersions: ["2026-07-28"],
       instructions:
-        `${SERVER_OPT_IN_INSTRUCTIONS} Prefer MCP Events after opt-in: create a task, subscribe to codex.task_changed, then submit. If this ChatGPT host cannot subscribe to Events, keep the same response active and use codex_task_wait with the last observed revision until Codex completes or needs attention; on timeout, wait again using the returned revision. Then read evidence and submit the next turn. Never require the user to relay Codex output. Codex approvals require the local operator.`,
+        `${SERVER_OPT_IN_INSTRUCTIONS} Prefer MCP Events after opt-in: create a task, subscribe to codex.task_changed, then submit. If this ChatGPT host cannot subscribe to Events, browser wake is an authorized UI fallback when available; otherwise keep the same response active and use codex_task_wait. For browser wake, print the returned CW-BIND marker in your short started reply and end that response; on wake read codex_task_get and review before any next turn. Never require the user to relay Codex output. Codex approvals require the local operator.`,
     },
   );
   const task_id = z.string().uuid();
@@ -63,7 +63,7 @@ export function createMcpServer(
   }, () => call(() => manager.listModels()));
   server.registerTool("codex_threads_list", {
     description: optInDescription("List bounded metadata for existing Codex threads under authorized development roots. Read-only; never returns message history."),
-    inputSchema: z.object({ limit: z.number().int().min(1).max(50).optional(), cursor: z.string().max(2048).optional(), workspace: z.string().min(1).max(4096).optional() }).strict(),
+    inputSchema: z.object({ limit: z.number().int().min(1).max(50).optional(), cursor: z.string().max(2048).optional(), workspace: z.string().min(1).max(4096).optional(), search: z.string().min(1).max(200).describe("Bounded documented title metadata search; no message history search").optional() }).strict(),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, (p) => call(() => manager.listThreads(p)));
   server.registerTool("codex_task_attach", {
@@ -108,6 +108,8 @@ export function createMcpServer(
           request_id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
           expected_revision: z.number().int().nonnegative(),
           ...selection,
+          wake: z.enum(["browser", "none"]).optional(),
+          conversation_url: z.string().max(128).optional(),
         })
         .strict(),
       annotations: {
@@ -119,7 +121,7 @@ export function createMcpServer(
     },
     (p) =>
       call(() =>
-        manager.submit(p.task_id, p.prompt, p.request_id, p.expected_revision, { model: p.model, reasoning_effort: p.reasoning_effort }),
+        manager.submit(p.task_id, p.prompt, p.request_id, p.expected_revision, { model: p.model, reasoning_effort: p.reasoning_effort }, { wake: p.wake, conversation_url: p.conversation_url }),
       ),
   );
   server.registerTool(

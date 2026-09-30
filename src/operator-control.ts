@@ -7,7 +7,7 @@ const MAX_BODY_BYTES = 64 * 1024;
 
 type JobControl = Pick<
   JobManager,
-  "get" | "respondApproval" | "respondInput"
+  "get" | "respondApproval" | "respondInput" | "wakeStatus" | "setWakePaused"
 >;
 
 export type OperatorControlOptions = {
@@ -114,6 +114,7 @@ export async function startOperatorControl(
           ok: true,
           pid: process.pid,
           operator_control: true,
+          browser_wake: jobs.wakeStatus(),
         });
         return;
       }
@@ -130,6 +131,9 @@ export async function startOperatorControl(
         writeJson(response, 200, jobs.get(task, { detail: "debug" }));
         return;
       }
+
+      if (command === "wake_status") { writeJson(response, 200, jobs.wakeStatus()); return; }
+      if (command === "wake_pause" || command === "wake_resume") { writeJson(response, 200, { changed: jobs.setWakePaused(command === "wake_pause"), ...jobs.wakeStatus() }); return; }
 
       if (command === "approve") {
         const task = requiredString(body, "task_id");

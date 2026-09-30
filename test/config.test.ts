@@ -88,6 +88,15 @@ test("Windows Codex resolver follows the current official runtime when a pinned 
   }
 });
 
+test("local execution/workspace policies and semantic labels are explicit and validated", () => {
+  const legacy = runtimeConfig({}); assert.equal(legacy.workspacePolicy, "roots"); assert.equal(legacy.executionPolicy, "legacy");
+  const config = runtimeConfig({ CODEX_WORKSPACE_POLICY: "explicit", CODEX_EXECUTION_POLICY: "danger-full-access", CODEX_BROWSER_WAKE: "1" });
+  assert.equal(config.workspacePolicy, "explicit"); assert.equal(config.executionPolicy, "danger-full-access"); assert.equal(config.browserWakeEnabled, true);
+  assert.throws(() => runtimeConfig({ CODEX_EXECUTION_POLICY: "approve-all" }), /policy/);
+  assert.throws(() => runtimeConfig({ CODEX_WORKSPACE_POLICY: "arbitrary" }), /policy/);
+  assert.throws(() => runtimeConfig({ CODEX_WAKE_LABELS: JSON.stringify({ selector: "#hidden" }) }));
+});
+
 test("runtime config reads JSON workspace roots and preserves the legacy root", () => {
   assert.deepEqual(runtimeConfig({ CODEX_WORKSPACE_ROOTS: '["C:\\\\src","D:\\\\work"]' }).workspaceRoots, ["C:\\src", "D:\\work"]);
   assert.deepEqual(runtimeConfig({ CODEX_WORKSPACE_ROOT: "C:\\legacy" }).workspaceRoots, ["C:\\legacy"]);

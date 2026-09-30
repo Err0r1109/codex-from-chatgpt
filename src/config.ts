@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { wakeLabelsSchema, type WakeLabels } from "./wake-state.js";
 
 export const SERVICE_NAME = "Codex Agent";
 export const DEFAULT_HOST = "127.0.0.1";
@@ -161,6 +162,11 @@ export function runtimeConfig(env: NodeJS.ProcessEnv = process.env): {
   shutdownTimeoutMs: number;
   stateFile: string | undefined;
   workspaceRoots: string[];
+  workspacePolicy: "roots" | "explicit";
+  executionPolicy: "legacy" | "danger-full-access";
+  browserWakeEnabled: boolean;
+  lbbMcpPath: string | undefined;
+  browserWakeLabels: WakeLabels | undefined;
 } {
   const parseDuration = (name: string, fallback: number): number => {
     const raw = env[name];
@@ -175,6 +181,8 @@ export function runtimeConfig(env: NodeJS.ProcessEnv = process.env): {
   };
 
   const host = env.HOST ?? DEFAULT_HOST;
+  for (const [key, values] of [["CODEX_WORKSPACE_POLICY", ["roots", "explicit"]], ["CODEX_EXECUTION_POLICY", ["legacy", "danger-full-access"]]] as const)
+    if (env[key] && !(values as readonly string[]).includes(env[key]!)) throw new Error(`Invalid operator policy: ${key}`);
   assertSafeHost(host, env.CODEX_AGENT_ALLOW_NON_LOOPBACK === "1");
   const port = parsePort(env.PORT ?? String(DEFAULT_PORT));
   let workspaceRoots: string[];
@@ -194,5 +202,10 @@ export function runtimeConfig(env: NodeJS.ProcessEnv = process.env): {
     shutdownTimeoutMs: parseDuration("CODEX_SHUTDOWN_TIMEOUT_MS", 2_000),
     stateFile: env.CODEX_AGENT_STATE_FILE,
     workspaceRoots,
+    workspacePolicy: env.CODEX_WORKSPACE_POLICY === "explicit" ? "explicit" : "roots",
+    executionPolicy: env.CODEX_EXECUTION_POLICY === "danger-full-access" ? "danger-full-access" : "legacy",
+    browserWakeEnabled: env.CODEX_BROWSER_WAKE === "1",
+    lbbMcpPath: env.CODEX_LBB_MCP_PATH,
+    browserWakeLabels: env.CODEX_WAKE_LABELS ? wakeLabelsSchema.parse(JSON.parse(env.CODEX_WAKE_LABELS)) : undefined,
   };
 }

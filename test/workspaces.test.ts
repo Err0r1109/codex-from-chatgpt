@@ -48,3 +48,22 @@ test("multiple workspace roots accept either root and reject outside and junctio
   await assert.rejects(validateWorkspace(outside, [one, two]));
   await assert.rejects(validateWorkspace(link, [one, two]));
 });
+
+test("explicit workspace policy accepts local paths while excluding private state ancestors", async () => {
+  const base = mkdtempSync(path.join(tmpdir(), "codex-explicit-workspace-"));
+  const project = path.join(base, "project");
+  const privateDir = path.join(base, "private");
+  mkdirSync(project);
+  mkdirSync(privateDir);
+  assert.equal(await validateWorkspace(project, null, path.join(privateDir, "state.json")), realpathSync(project));
+  await assert.rejects(validateWorkspace(base, null, path.join(privateDir, "state.json")), /private bridge state/);
+  await assert.rejects(validateWorkspace(privateDir, null, path.join(privateDir, "state.json")), /private bridge state/);
+  const child = path.join(privateDir, "child"); mkdirSync(child);
+  await assert.rejects(validateWorkspace(child, null, path.join(privateDir, "state.json")), /private bridge state/);
+  await assert.rejects(validateWorkspace(project, [privateDir], path.join(privateDir, "state.json")), /dentro de/);
+  await assert.rejects(validateWorkspace(`${project}\0`, null), /NUL/);
+  if (process.platform === "win32") {
+    for (const unsafe of ["\\\\?\\C:\\Windows", "\\\\.\\C:\\Windows", "\\\\server\\share", "C:relative"])
+      await assert.rejects(validateWorkspace(unsafe, null));
+  }
+});

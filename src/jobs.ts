@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 
 import type { CommandExecutionApprovalDecision } from "../protocol/codex-0.147.0-ts/v2/CommandExecutionApprovalDecision.js";
 import type { FileChangeApprovalDecision } from "../protocol/codex-0.147.0-ts/v2/FileChangeApprovalDecision.js";
 import type { PermissionsRequestApprovalResponse } from "../protocol/codex-0.147.0-ts/v2/PermissionsRequestApprovalResponse.js";
 import type { ReviewDecision } from "../protocol/codex-0.147.0-ts/ReviewDecision.js";
 import type { ThreadStartParams } from "../protocol/codex-0.147.0-ts/v2/ThreadStartParams.js";
+import type { ThreadResumeParams } from "../protocol/codex-0.147.0-ts/v2/ThreadResumeParams.js";
+import type { ThreadListParams } from "../protocol/codex-0.147.0-ts/v2/ThreadListParams.js";
 import type { TurnStartParams } from "../protocol/codex-0.147.0-ts/v2/TurnStartParams.js";
 
 import {
@@ -22,6 +25,7 @@ import {
 } from "./store.js";
 import { validateWorkspace } from "./workspaces.js";
 import { ModelCatalog, requireChatGPT, type Selection, type Settings, type TurnModelEvidence } from "./models.js";
+import { conversationUrl } from "./wake-state.js";
 
 export type JobStatus =
   | "input_required"
@@ -51,8 +55,7 @@ export type AuthorizationAudit = {
 
 function authorizationAudit(basis?: string): AuthorizationAudit {
   const trimmed = basis?.trim();
-  if (trimmed && trimmed.length > 500)
-    throw new Error("authorization_basis exceeds 500 characters");
+  if (trimmed && trimmed.length > 500) throw new Error("authorization_basis exceeds 500 characters");
   return {
     user_authorized: true,
     basis: trimmed || null,
@@ -80,7 +83,7 @@ type JobRecord = {
   turnCount: number;
   requests: Record<
     string,
-    { hash: string; hash_version?: 2; turn_id: string | null; previous_turn_id?: string | null }
+      { hash: string; hash_version?: 2 | 3; turn_id: string | null; previous_turn_id?: string | null; wake?: "browser" | "none" | "events" }
   >;
   stopped: boolean;
   deadline: number | null;
@@ -88,6 +91,7 @@ type JobRecord = {
   threadId: string | null;
   workspace: string;
   authorization: AuthorizationAudit | null;
+  wake?: { enabled: boolean; conversation_url: string | null; binding_marker: string };
   turnId: string | null;
   status: JobStatus;
   finalMessage: string | null;
@@ -219,6 +223,9 @@ export type JobManagerOptions = {
   maxTurns?: number;
   turnTimeoutMs?: number;
   workspaceRoots?: string[];
+  workspacePolicy?: "roots" | "explicit";
+  executionPolicy?: "legacy" | "danger-full-access";
+  browserWakeEnabled?: boolean;
 };
 
 export const COMPLETION_REPORT_MARKER =
@@ -766,6 +773,19 @@ export class JobManager {
   private readonly maxTurns: number;
   private readonly turnTimeoutMs: number;
   private readonly workspaceRoots?: string[];
+  private readonly workspacePolicy: "roots" | "explicit";
+  private readonly executionPolicy: "legacy" | "danger-full-access";
+  private readonly wakePauseFile: string;
+  private wakePaused = false;
+  private readonly browserWakeEnabled: boolean;
+  private wakeServiceStatus: (() => object) | undefined;
+  pinBrowserConversation(task: string, url: string): void {
+    const job = this.getJob(task);
+    if (!job.wake?.enabled) throw new Error("Browser wake disarmed");
+    job.wake.conversation_url = url; this.persist(job, true);
+  }
+  bindWakeService(status: () => object): void { this.wakeServiceStatus = status; }
+  isWakePaused(): boolean { return this.wakePaused; }
   private readonly deadlines = new Map<string, NodeJS.Timeout>();
   private readonly loadedThreads = new Set<string>();
   private readonly waiters = new Map<string, Set<() => void>>();
@@ -779,7 +799,12 @@ export class JobManager {
     options: JobManagerOptions = {},
   ) {
     this.store = options.store ?? new StateStore();
+    this.wakePauseFile = path.join(path.dirname(this.store.filePath), "browser-wake.paused");
+    this.wakePaused = existsSync(this.wakePauseFile);
     this.workspaceRoots = options.workspaceRoots;
+    this.workspacePolicy = options.workspacePolicy ?? "roots";
+    this.executionPolicy = options.executionPolicy ?? "legacy";
+    this.browserWakeEnabled = options.browserWakeEnabled ?? false;
     this.maxTurns =
       options.maxTurns ?? Number(process.env.CODEX_AGENT_MAX_TURNS ?? 8);
     this.turnTimeoutMs =
@@ -817,7 +842,7 @@ export class JobManager {
   }
 
   async create(workspace: string, selection: Selection = {}, authorizationBasis?: string): Promise<JobStartResult> {
-    const canonicalWorkspace = await validateWorkspace(workspace, this.workspaceRoots);
+    const canonicalWorkspace = await validateWorkspace(workspace, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath);
     const stateRelative = path.relative(
       canonicalWorkspace,
       this.store.filePath,
@@ -875,9 +900,9 @@ export class JobManager {
           ...(resolved.reasoning_effort ? { config: { model_reasoning_effort: resolved.reasoning_effort } } : {}),
           modelProvider: "openai",
           cwd: canonicalWorkspace,
-          approvalPolicy: "on-request",
+          sandbox: this.executionPolicy === "danger-full-access" ? "danger-full-access" : "workspace-write",
+          approvalPolicy: this.executionPolicy === "danger-full-access" ? "never" : "on-request",
           approvalsReviewer: "user",
-          sandbox: "workspace-write",
         } satisfies ThreadStartParams);
         const thread =
           isObject(response) && isObject(response.thread)
@@ -913,21 +938,23 @@ export class JobManager {
     });
   }
 
-  async listThreads(options: { limit?: number; cursor?: string; workspace?: string } = {}): Promise<object> {
+  async listThreads(options: { limit?: number; cursor?: string; workspace?: string; search?: string } = {}): Promise<object> {
     await this.withExclusive(async () => { await this.ensureReady(); });
     const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 20)));
     if (!Number.isFinite(limit)) throw new Error("Invalid limit");
+    if (options.search !== undefined && (!options.search.trim() || options.search.length > 200)) throw new Error("Invalid thread metadata search");
     let workspace: string | undefined;
-    if (options.workspace) workspace = await validateWorkspace(options.workspace, this.workspaceRoots);
+    if (options.workspace) workspace = await validateWorkspace(options.workspace, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath);
     const response = await this.appServer.request<unknown>("thread/list", {
       limit, useStateDbOnly: true, ...(options.cursor ? { cursor: options.cursor } : {}),
-    });
+      ...(options.search ? { searchTerm: options.search } : {}),
+    } satisfies ThreadListParams);
     if (!isObject(response) || !Array.isArray(response.data)) throw new Error("Invalid thread/list response");
     const threads = [];
     for (const raw of response.data) {
       if (!isObject(raw) || typeof raw.id !== "string" || typeof raw.cwd !== "string") continue;
       let cwd: string;
-      try { cwd = await validateWorkspace(raw.cwd, this.workspaceRoots); } catch { continue; }
+      try { cwd = await validateWorkspace(raw.cwd, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath); } catch { continue; }
       if (workspace && cwd !== workspace && !cwd.startsWith(`${workspace}${path.sep}`)) continue;
       const git = isObject(raw.gitInfo) ? raw.gitInfo : {};
       const source = isObject(raw.source) ? raw.source : null;
@@ -964,7 +991,7 @@ export class JobManager {
       const thread = isObject(read) && isObject(read.thread) ? read.thread : null;
       if (!thread || thread.id !== threadId) throw new Error("thread/read did not confirm the requested thread");
       if (typeof thread.cwd !== "string" || !path.isAbsolute(thread.cwd)) throw new Error("Existing thread has missing or invalid cwd");
-      const workspace = await validateWorkspace(thread.cwd, this.workspaceRoots);
+      const workspace = await validateWorkspace(thread.cwd, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath);
       const turns = Array.isArray(thread.turns) ? thread.turns.filter(isObject) : [];
       const latest = turns.at(-1);
       if (latest && !isTerminal(latest.status)) throw new Error(`Cannot attach thread with nonterminal or ambiguous latest turn status: ${String(latest.status)}`);
@@ -1013,25 +1040,33 @@ export class JobManager {
     requestId: string,
     expectedRevision?: number,
     selection: Selection = {},
-  ): Promise<JobStartResult> {
+    wakeOptions: { wake?: "browser" | "none"; conversation_url?: string } = {},
+  ): Promise<JobStartResult & { wake?: { state: string; binding_marker: string; transport: string; conversation_url: string | null } }> {
     this.validatePrompt(prompt);
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId))
       throw new Error("Invalid request_id");
     return this.withExclusive(async () => {
       const job = this.getJob(jobId);
-      const hash = createHash("sha256").update(JSON.stringify([prompt, selection.model ?? null, selection.reasoning_effort ?? null])).digest("hex");
+      const canonicalUrl = wakeOptions.conversation_url;
+      if (canonicalUrl && job.wake?.conversation_url && canonicalUrl !== job.wake.conversation_url) throw new Error("Task is already bound to a different canonical conversation");
+      if (canonicalUrl && !conversationUrl.test(canonicalUrl)) throw new Error("conversation_url must be canonical https://chatgpt.com/c/UUID");
+      const browserWake = wakeOptions.wake === "browser" || (!wakeOptions.wake && this.getJob(jobId).wake?.enabled === true);
+      const eventsWake = this.store.hasActiveSubscription(jobId);
+      const effectiveWake = eventsWake ? "events" : wakeOptions.wake ?? (browserWake ? "browser" : undefined);
+      const hash = createHash("sha256").update(JSON.stringify(["submit-v3", prompt, selection.model ?? null, selection.reasoning_effort ?? null, wakeOptions.wake ?? null, canonicalUrl ?? null])).digest("hex");
       const prior = Object.hasOwn(job.requests, requestId)
         ? job.requests[requestId]
         : undefined;
       if (prior) {
         // Old prompt-only records can only match a request with no overrides.
-        const compareHash = prior.hash_version === 2 ? hash :
+        const compareHash = prior.hash_version === 3 ? hash : prior.hash_version === 2 && !wakeOptions.wake && !canonicalUrl ? createHash("sha256").update(JSON.stringify([prompt, selection.model ?? null, selection.reasoning_effort ?? null])).digest("hex") :
           !selection.model && !selection.reasoning_effort ? createHash("sha256").update(prompt).digest("hex") : null;
         if (prior.hash !== compareHash)
           throw new Error("request_id already used for a different prompt or model selection");
         return {
           ...this.startResult(job),
           turn_id: prior.turn_id ?? undefined,
+          ...(job.wake ? { wake: this.wakeView(job, prior.wake ?? "none") } : {}),
         };
       }
       await this.ensureReady();
@@ -1063,16 +1098,14 @@ export class JobManager {
         throw new Error(
           "el job aún no tiene un thread confirmado; requiere reconciliación.",
         );
-      await validateWorkspace(job.workspace, this.workspaceRoots);
+      await validateWorkspace(job.workspace, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath);
       if (!this.loadedThreads.has(job.threadId)) {
         await requireChatGPT(this.appServer);
         const resumed = await this.appServer.request<unknown>("thread/resume", {
           threadId: job.threadId,
           cwd: job.workspace,
-          sandbox: "workspace-write",
-          approvalPolicy: "on-request",
-          approvalsReviewer: "user",
-        });
+          ...this.executionFields(),
+        } satisfies ThreadResumeParams);
         if (
           !isObject(resumed) ||
           !isObject(resumed.thread) ||
@@ -1097,10 +1130,20 @@ export class JobManager {
         this.loadedThreads.add(job.threadId);
         this.recordSettings(job, resumed, "thread/resume");
       }
+      const read = await this.appServer.request<unknown>("thread/read", { threadId: job.threadId, includeTurns: true });
+      const currentThread = isObject(read) && isObject(read.thread) ? read.thread : null;
+      if (!currentThread || currentThread.id !== job.threadId || !Array.isArray(currentThread.turns)) throw new Error("Thread identity or active-turn evidence unavailable");
+      if (currentThread.turns.some(t => !isObject(t) || !isTerminal(t.status))) throw new Error("Existing thread has an external active or ambiguous turn; no turn started");
+      if (typeof currentThread.cwd === "string" && await validateWorkspace(currentThread.cwd, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath) !== job.workspace) throw new Error("Thread workspace changed externally");
       const resolved = await this.catalog.resolve(selection, job.settings, job.workspace);
       if (job.settings?.model_provider && job.settings.model_provider !== "openai") throw new Error("Only ChatGPT-authenticated OpenAI Codex is permitted");
+      if (wakeOptions.wake === "none") job.wake = { enabled: false, conversation_url: job.wake?.conversation_url ?? null, binding_marker: job.wake?.binding_marker ?? `CW-BIND-${randomUUID()}` };
+      else if (browserWake) {
+        if (!this.browserWakeEnabled) throw new Error("Browser wake is not enabled by local operator configuration");
+        job.wake = { enabled: true, conversation_url: canonicalUrl ?? job.wake?.conversation_url ?? null, binding_marker: job.wake?.binding_marker ?? `CW-BIND-${randomUUID()}` };
+      }
       Object.defineProperty(job.requests, requestId, {
-        value: { hash, hash_version: 2, turn_id: null, previous_turn_id: job.turnId },
+        value: { hash, hash_version: 3, turn_id: null, previous_turn_id: job.turnId, wake: effectiveWake },
         writable: true,
         enumerable: true,
         configurable: true,
@@ -1115,7 +1158,7 @@ export class JobManager {
         this.setFailure(job, error, true);
         throw error;
       }
-      return this.startResult(job);
+      return { ...this.startResult(job), ...(job.wake ? { wake: this.wakeView(job, effectiveWake ?? "none") } : {}) };
     });
   }
 
@@ -1208,7 +1251,7 @@ export class JobManager {
   }
 
   async authorizeTask(jobId: string): Promise<void> {
-    await validateWorkspace(this.getJob(jobId).workspace, this.workspaceRoots);
+    await validateWorkspace(this.getJob(jobId).workspace, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath);
   }
 
   async respondInput(
@@ -1404,7 +1447,7 @@ export class JobManager {
     mayResume: boolean,
   ): Promise<void> {
     try {
-      job.workspace = await validateWorkspace(job.workspace, this.workspaceRoots);
+      job.workspace = await validateWorkspace(job.workspace, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath);
       const response = await this.appServer.request<unknown>("thread/read", {
         threadId: job.threadId,
         includeTurns: true,
@@ -1463,6 +1506,7 @@ export class JobManager {
         const expectedTurnId = requiredString(latest?.id, "turn.id");
         const resumed = await this.appServer.request<unknown>("thread/resume", {
           threadId: job.threadId,
+          ...this.executionFields(),
         });
         const resumedThread =
           isObject(resumed) && isObject(resumed.thread) ? resumed.thread : null;
@@ -1548,6 +1592,7 @@ export class JobManager {
       threadId: value.thread_id,
       workspace: value.workspace,
       authorization: value.authorization ?? null,
+      wake: value.wake,
       turnId: value.turn_id,
       status,
       finalMessage: value.final_message,
@@ -1623,6 +1668,7 @@ export class JobManager {
       ...(resolved.reasoning_effort
         ? { effort: resolved.reasoning_effort as TurnStartParams["effort"] }
         : {}),
+      ...(this.executionPolicy === "danger-full-access" ? { sandboxPolicy: { type: "dangerFullAccess" }, approvalPolicy: "never" as const } : {}),
     };
     try {
       const response = await this.appServer.request<unknown>(
@@ -1635,6 +1681,8 @@ export class JobManager {
       capture.turnId = turnId;
       job.turnId = turnId;
       evidence.turn_id = turnId;
+      const pendingRequest = Object.values(job.requests).find(r => r.turn_id === null);
+      if (pendingRequest) pendingRequest.turn_id = turnId;
       for (const message of capture.buffered) {
         const legacyApproval =
           message.method === "applyPatchApproval" ||
@@ -2166,6 +2214,7 @@ export class JobManager {
       thread_id: job.threadId,
       workspace: job.workspace,
       authorization: job.authorization ?? undefined,
+      wake: job.wake,
       turn_id: job.turnId,
       status: job.status,
       final_message: job.finalMessage,
@@ -2219,6 +2268,31 @@ export class JobManager {
         throw new Error(`No se pudo persistir el estado local: ${message}`);
       return false;
     }
+  }
+
+  private wakeView(job: JobRecord, transport: string) {
+    const intent = this.store.wakeIntents().reverse().find(w => w.task_id === job.jobId && w.turn_id === job.turnId);
+    return { state: transport === "events" ? "selected" : transport === "browser" ? intent?.state ?? "armed" : "disabled",
+      binding_marker: job.wake!.binding_marker, transport, conversation_url: job.wake!.conversation_url };
+  }
+
+  wakeStatus(): object {
+    return this.wakeServiceStatus?.() ?? { service: this.wakePaused ? "paused" : this.browserWakeEnabled ? "pending" : "disabled", pending: this.store.wakeIntents().filter(w => !["delivered", "cancelled"].includes(w.state)).length };
+  }
+
+  setWakePaused(paused: boolean): number {
+    // Publish the operator switch before acknowledging it; a failed resume keeps delivery paused.
+    if (paused) this.wakePaused = true;
+    if (paused) writeFileSync(this.wakePauseFile, "paused\n", { mode: 0o600 });
+    else if (existsSync(this.wakePauseFile)) unlinkSync(this.wakePauseFile);
+    this.wakePaused = paused;
+    return this.store.wakeIntents().filter(w => !["delivered", "cancelled"].includes(w.state)).length;
+  }
+
+  private executionFields(): { sandbox: "danger-full-access" | "workspace-write"; approvalPolicy: "never" | "on-request"; approvalsReviewer: "user" } {
+    return this.executionPolicy === "danger-full-access"
+      ? { sandbox: "danger-full-access", approvalPolicy: "never", approvalsReviewer: "user" }
+      : { sandbox: "workspace-write", approvalPolicy: "on-request", approvalsReviewer: "user" };
   }
 
   private startResult(job: JobRecord): JobStartResult {

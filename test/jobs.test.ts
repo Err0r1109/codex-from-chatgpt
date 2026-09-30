@@ -80,10 +80,13 @@ class FakeAppServer implements AppServerClient {
   emitExit(error = new Error("fake app-server crash")): void { for (const listener of this.exitListeners) listener(error); }
 }
 
-function managerFixture(): { fake: FakeAppServer; manager: JobManager; store: StateStore } {
-  const store = new StateStore(path.join(mkdtempSync(path.join(tmpdir(), "codex-agent-mcp-")), "state.json"));
+function managerFixture(browserWakeEnabled = false): { fake: FakeAppServer; manager: JobManager; store: StateStore } {
+  const store = new StateStore(
+    path.join(mkdtempSync(path.join(tmpdir(), "codex-agent-mcp-")), "state.json"),
+    { enforcePrivateAcl: false },
+  );
   const fake = new FakeAppServer();
-  return { fake, manager: new JobManager(fake, { store }), store };
+  return { fake, manager: new JobManager(fake, { store, browserWakeEnabled }), store };
 }
 
 function completed(fake: FakeAppServer, turnId = "turn-1", threadId = "thread-1", items: unknown[] = []): void {
@@ -485,6 +488,122 @@ test("completion handoff is appended once while preserving the caller prompt", a
   const secondText = ((turnStarts[1]?.params as { input: Array<{ text: string }> }).input[0]?.text) ?? "";
   assert.equal(secondText, "Now verify the result.");
   assert.equal(secondText.includes(COMPLETION_REPORT_MARKER), false);
+});
+
+test("browser wake is write-ahead, atomic with completion, deduplicated, and restart durable", async () => {
+  const { fake, manager, store } = managerFixture(true);
+  const task = await manager.create(workspace);
+  const url = "https://chatgpt.com/c/123e4567-e89b-42d3-a456-426614174000";
+  const accepted = await manager.submit(task.job_id!, "work", "wake-1", task.revision, {}, { wake: "browser", conversation_url: url });
+  assert.match(accepted.wake?.binding_marker ?? "", /^CW-BIND-[0-9a-f-]{36}$/);
+  const beforeStart = store.load()[0]!;
+  assert.equal(beforeStart.wake?.conversation_url, url);
+  assert.equal(beforeStart.requests?.["wake-1"]?.wake, "browser");
+  completed(fake);
+  const wakes = store.wakeIntents();
+  assert.equal(wakes.length, 1);
+  assert.equal(wakes[0]?.state, "pending");
+  assert.equal(wakes[0]?.task_id, task.job_id);
+  store.save(store.load());
+  assert.equal(store.wakeIntents().length, 1);
+  const restored = new StateStore(store.filePath);
+  restored.load();
+  assert.deepEqual(restored.wakeIntents(), wakes);
+});
+
+test("browser wake idempotency includes target and wake choice", async () => {
+  const { manager } = managerFixture(true);
+  const task = await manager.create(workspace);
+  await manager.submit(task.job_id!, "work", "wake-hash", task.revision, {}, { wake: "browser" });
+  await assert.rejects(manager.submit(task.job_id!, "work", "wake-hash", task.revision, {}, { wake: "none" }), /different prompt|model selection/);
+  await assert.rejects(manager.continue(task.job_id!, "work"), /ocupado|busy/);
+});
+
+test("ultrafast completion maps write-ahead wake request before terminal persistence", async () => {
+  const { manager, fake, store } = managerFixture(true); fake.earlyCompletion = true;
+  const task = await manager.create(workspace);
+  await manager.submit(task.job_id!, "work", "early-wake", task.revision, {}, { wake: "browser" });
+  assert.equal(store.wakeIntents().length, 1); assert.equal(store.wakeIntents()[0]!.turn_id, "turn-1");
+  const jobs = store.jobsSnapshot(); jobs[0]!.revision!++; store.save(jobs);
+  assert.equal(store.wakeIntents().length, 1);
+});
+
+test("active Events selects one transport without claiming browser delivery", async () => {
+  const { manager, fake, store } = managerFixture(true);
+  const task = await manager.create(workspace);
+  store.updateEvents(e => e.subscriptions.push({ id: "sub", owner: "fixture", taskId: task.job_id!, url: "https://example.com", secret: "fixture", expiresAt: Date.now() + 60000, verifiedUntil: Date.now() + 60000 }));
+  const response = await manager.submit(task.job_id!, "work", "events-wake", task.revision, {}, { wake: "browser" });
+  assert.equal(response.wake?.transport, "events"); completed(fake);
+  assert.equal(store.wakeIntents().length, 0); assert.equal(store.eventState().outbox[0]!.state, "pending");
+});
+
+test("disabling browser wake preserves a genuine Events subscription", async () => {
+  const { manager, fake, store } = managerFixture(true); const task = await manager.create(workspace);
+  store.updateEvents(e => e.subscriptions.push({ id: "sub", owner: "fixture", taskId: task.job_id!, url: "https://example.com", secret: "fixture", expiresAt: Date.now() + 60000, verifiedUntil: Date.now() + 60000 }));
+  const response = await manager.submit(task.job_id!, "work", "events-no-browser", task.revision, {}, { wake: "none" });
+  assert.equal(response.wake?.transport, "events"); completed(fake);
+  assert.equal(store.eventState().outbox.length, 1); assert.equal(store.wakeIntents().length, 0);
+});
+
+test("subsequent wake inherits binding and explicit none cancels pending old delivery", async () => {
+  const { manager, fake, store } = managerFixture(true);
+  const task = await manager.create(workspace);
+  const url = "https://chatgpt.com/c/123e4567-e89b-42d3-a456-426614174000";
+  const first = await manager.submit(task.job_id!, "work", "inherit-1", task.revision, {}, { wake: "browser", conversation_url: url }); completed(fake);
+  const second = await manager.submit(task.job_id!, "next", "inherit-2", manager.get(task.job_id!).revision);
+  assert.equal(second.wake?.binding_marker, first.wake?.binding_marker); assert.equal(second.wake?.conversation_url, url);
+  assert.equal(store.wakeIntents()[0]!.state, "cancelled"); completed(fake, "turn-2");
+  await manager.submit(task.job_id!, "next", "inherit-3", manager.get(task.job_id!).revision, {}, { wake: "none" });
+  assert.ok(store.wakeIntents().every(w => w.state === "cancelled"));
+});
+
+test("same-thread attach refuses externally active turn without fork or duplicate", async () => {
+  const { manager, fake } = managerFixture(); fake.readThread = { id: "thread-1", cwd: workspace, turns: [{ id: "old", status: "completed" }] };
+  const task = await manager.attach("thread-1"); assert.equal((await manager.attach("thread-1")).job_id, task.job_id);
+  fake.resumeResponse = fake.readThread;
+  (fake.readThread as any).turns.push({ id: "external", status: "inProgress" });
+  await assert.rejects(manager.submit(task.job_id!, "next", "external-check", task.revision), /active|recovery/i);
+  assert.equal(fake.requests.filter(r => ["thread/start", "thread/fork", "turn/start"].includes(r.method)).length, 0);
+});
+
+test("wake pause is operator-owned and survives manager restart", async () => {
+  const { manager, fake, store } = managerFixture(true); manager.setWakePaused(true);
+  const restarted = new JobManager(fake, { store: new StateStore(store.filePath), browserWakeEnabled: true });
+  assert.equal(restarted.isWakePaused(), true); restarted.setWakePaused(false); assert.equal(restarted.isWakePaused(), false);
+});
+
+test("danger full access maps to documented thread and turn fields", async () => {
+  const store = new StateStore(path.join(mkdtempSync(path.join(tmpdir(), "codex-agent-mcp-")), "state.json"));
+  const fake = new FakeAppServer();
+  const manager = new JobManager(fake, { store, executionPolicy: "danger-full-access" });
+  const task = await manager.create(workspace);
+  const threadParams = fake.requests.find((item) => item.method === "thread/start")?.params as Record<string, unknown>;
+  assert.equal(threadParams.sandbox, "danger-full-access");
+  assert.equal(threadParams.approvalPolicy, "never");
+  await manager.submit(task.job_id!, "work", "full-access", task.revision);
+  const turnParams = fake.requests.find((item) => item.method === "turn/start")?.params as Record<string, unknown>;
+  assert.deepEqual(turnParams.sandboxPolicy, { type: "dangerFullAccess" });
+  assert.equal(turnParams.approvalPolicy, "never");
+});
+
+test("full access resume retains same attached thread and metadata search uses documented searchTerm", async () => {
+  const store = new StateStore(path.join(mkdtempSync(path.join(tmpdir(), "codex-agent-mcp-")), "state.json"));
+  const fake = new FakeAppServer(); fake.readThread = { id: "thread-1", cwd: workspace, turns: [{ id: "historic", status: "completed" }] };
+  const manager = new JobManager(fake, { store, executionPolicy: "danger-full-access", workspacePolicy: "explicit" });
+  const task = await manager.attach("thread-1");
+  await manager.listThreads({ search: "bounded title", limit: 5 });
+  assert.equal((fake.requests.find(r => r.method === "thread/list")!.params as any).searchTerm, "bounded title");
+  await manager.submit(task.job_id!, "continue", "resume-policy", task.revision);
+  const resume = fake.requests.find(r => r.method === "thread/resume")!.params as any;
+  assert.equal(resume.threadId, "thread-1"); assert.equal(resume.sandbox, "danger-full-access"); assert.equal(resume.approvalPolicy, "never");
+  assert.equal(fake.requests.filter(r => r.method === "thread/start").length, 0);
+});
+
+test("rejected busy submit cannot disarm an accepted wake", async () => {
+  const { manager, store } = managerFixture(true); const task = await manager.create(workspace);
+  await manager.submit(task.job_id!, "work", "armed", task.revision, {}, { wake: "browser" });
+  await assert.rejects(manager.submit(task.job_id!, "next", "busy-disable", manager.get(task.job_id!).revision, {}, { wake: "none" }), /ocupado/);
+  assert.equal(store.jobsSnapshot()[0]!.wake!.enabled, true);
 });
 
 test("terminal turn/start y turn/completed registran items antes de cerrar", async () => {

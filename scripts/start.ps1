@@ -16,6 +16,11 @@ if ($config.workspaceRoots -and @($config.workspaceRoots).Count -gt 0) {
 $env:CODEX_AGENT_STATE_FILE = Join-Path $runtime 'state.json'
 $env:CODEX_AGENT_MAX_TURNS = [string]$config.maxTurns
 $env:CODEX_AGENT_TURN_TIMEOUT_MS = [string]$config.turnTimeoutMs
+$env:CODEX_WORKSPACE_POLICY = [string]$config.workspacePolicy
+$env:CODEX_EXECUTION_POLICY = [string]$config.executionPolicy
+$env:CODEX_BROWSER_WAKE = if ($config.browserWake.enabled) { '1' } else { '0' }
+$env:CODEX_LBB_MCP_PATH = [string]$config.browserWake.lbbMcpPath
+$env:CODEX_WAKE_LABELS = if ($config.browserWake.labels) { ConvertTo-Json -InputObject $config.browserWake.labels -Depth 5 -Compress } else { $null }
 $env:PORT = [string]$config.port
 $env:HOST = '127.0.0.1'
 $env:CODEX_BIN = $config.codexBin
