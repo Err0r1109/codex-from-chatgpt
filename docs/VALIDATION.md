@@ -12,6 +12,10 @@ ChatGPT permission settings were not changed. The policy preserves full task aut
 
 Validation on the clean policy worktree passed TypeScript typecheck and build. The complete wrapper suite reported **91 tests: 90 passed, zero failed, one optional real-App-Server handshake skipped**. New coverage checks all six authorization acceptance cases, verifies that every advertised Codex tool is wired through the opt-in description prefix, and confirms that the client-attested authorization audit persists across a subsequent turn without requiring another authorization basis.
 
+The clean build was deployed to the installed bridge without enabling the unfinished browser-wake worktree. After supervised restart, bridge and official tunnel both returned ready. A live MCP client negotiated protocol `2026-07-28`: all eight advertised tool descriptions began with the exact `EXPLICIT USER OPT-IN REQUIRED` prefix, create/attach exposed the optional `authorization_basis` schema, and `getInstructions()` returned the full opt-in contract and acceptance examples. No Codex task or model turn was invoked for this policy deployment.
+
+The ChatGPT development-plugin metadata was also updated: its app description now starts `USER-OPT-IN ONLY` and states that a coding request or mere Codex mention is not authorization. The plugin permission remained **Allow all tools**; no permission setting was changed. `Refresh tools` completed successfully, and the Personal plugin directory displayed the new description.
+
 
 ## Existing-thread attach and configurable development roots
 
