@@ -45,7 +45,7 @@ async function main() {
     await appServer.start();
     await requireChatGPT(appServer);
     console.error("Codex worker: App Server default; authentication: ChatGPT");
-    const jobs = new JobManager(appServer, { store });
+    const jobs = new JobManager(appServer, { store, workspaceRoots: config.workspaceRoots });
     events = new EventService(store, (id) => jobs.authorizeTask(id));
     await jobs.initialize();
     const handler = createBridgeHandler(jobs, events);

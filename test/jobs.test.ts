@@ -32,6 +32,7 @@ class FakeAppServer implements AppServerClient {
   readonly interruptStarted: Promise<void>;
   private resolveInterruptStarted!: () => void;
   readThread: unknown = { id: "thread-1", turns: [] };
+  listedThreads: unknown = { data: [], nextCursor: null };
 
   constructor() {
     this.resumeStarted = new Promise<void>((resolve) => { this.resolveResumeStarted = resolve; });
@@ -51,6 +52,7 @@ class FakeAppServer implements AppServerClient {
       return { thread: { id: "thread-1" } } as T;
     }
     if (method === "thread/read") return { thread: this.readThread } as T;
+    if (method === "thread/list") return this.listedThreads as T;
     if (method === "thread/resume") {
       this.resolveResumeStarted();
       if (this.resumeGate) await this.resumeGate;
@@ -101,6 +103,53 @@ test("happy path start -> completed keeps a compact summary", async () => {
   assert.equal(snapshot.final_message, "resultado");
   assert.deepEqual(snapshot.commands_executed, ["pwd"]);
   assert.equal(snapshot.latest_diff, "diff --git a/a b/a");
+});
+
+test("thread list is bounded, paginated and filters unauthorized cwd", async () => {
+  const { fake, manager } = managerFixture();
+  fake.listedThreads = { data: [
+    { id: "safe", cwd: workspace, preview: "x".repeat(400), model: "fixture", reasoningEffort: "medium", updatedAt: 1_800_000_000, source: { type: "cli" }, status: { type: "idle" }, gitInfo: { branch: "main", sha: "abc" } },
+    { id: "outside", cwd: tmpdir(), preview: "secret" },
+  ], nextCursor: "next" };
+  const result = await manager.listThreads({ limit: 100 });
+  const data = result as { threads: Array<Record<string, unknown>>; next_cursor: string };
+  assert.equal(data.threads.length, 1);
+  assert.equal(String(data.threads[0]!.preview).length, 240);
+  assert.equal(data.next_cursor, "next");
+  assert.equal((fake.requests.find((r) => r.method === "thread/list")!.params as { limit: number }).limit, 50);
+});
+
+test("attach preserves completed thread and bridge turn quota, then resumes same thread", async () => {
+  const { fake, manager } = managerFixture();
+  fake.readThread = { id: "existing", cwd: workspace, model: "fixture", reasoningEffort: "medium", modelProvider: "openai", turns: [
+    { id: "old-1", status: "completed", items: [{ type: "userMessage", content: [{ type: "text", text: "historical context" }] }] },
+  ] };
+  fake.resumeResponse = { thread: { ...fake.readThread, turns: fake.readThread.turns } };
+  const attached = await manager.attach("existing");
+  assert.equal(attached.thread_id, "existing");
+  assert.equal(attached.status, "ready");
+  assert.equal(manager.get(attached.job_id!, {}).turn_count, 0);
+  assert.equal(manager.get(attached.job_id!, {}).historical_turn_count, 1);
+  const duplicate = await manager.attach("existing");
+  assert.equal(duplicate.job_id, attached.job_id);
+  const before = fake.requests.length;
+  await manager.submit(attached.job_id!, "continue history", "continue-1");
+  const requests = fake.requests.slice(before);
+  assert.ok(requests.some((r) => r.method === "thread/resume" && (r.params as { threadId: string }).threadId === "existing"));
+  assert.ok(!requests.some((r) => r.method === "thread/start"));
+  const resumed = requests.find((r) => r.method === "thread/resume")!.params as { threadId: string };
+  assert.equal(resumed.threadId, "existing");
+  assert.equal(manager.get(attached.job_id!, {}).turn_count, 1);
+});
+
+test("attach rejects active and invalid or unauthorized threads", async () => {
+  const { fake, manager } = managerFixture();
+  fake.readThread = { id: "existing", cwd: workspace, turns: [{ id: "active", status: "inProgress" }] };
+  await assert.rejects(manager.attach("existing"), /nonterminal/);
+  fake.readThread = { id: "existing", turns: [] };
+  await assert.rejects(manager.attach("existing"), /cwd/);
+  fake.readThread = { id: "existing", cwd: tmpdir(), turns: [] };
+  await assert.rejects(manager.attach("existing"), /autorizada/);
 });
 
 test("wait times out without polling or mutating revision", async () => {

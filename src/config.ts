@@ -160,6 +160,7 @@ export function runtimeConfig(env: NodeJS.ProcessEnv = process.env): {
   rpcTimeoutMs: number;
   shutdownTimeoutMs: number;
   stateFile: string | undefined;
+  workspaceRoots: string[];
 } {
   const parseDuration = (name: string, fallback: number): number => {
     const raw = env[name];
@@ -176,6 +177,14 @@ export function runtimeConfig(env: NodeJS.ProcessEnv = process.env): {
   const host = env.HOST ?? DEFAULT_HOST;
   assertSafeHost(host, env.CODEX_AGENT_ALLOW_NON_LOOPBACK === "1");
   const port = parsePort(env.PORT ?? String(DEFAULT_PORT));
+  let workspaceRoots: string[];
+  if (env.CODEX_WORKSPACE_ROOTS) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(env.CODEX_WORKSPACE_ROOTS); } catch { throw new Error("CODEX_WORKSPACE_ROOTS debe ser JSON válido."); }
+    if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > 64 || parsed.some((root) => typeof root !== "string" || root.length === 0))
+      throw new Error("CODEX_WORKSPACE_ROOTS debe ser un array JSON de 1 a 64 rutas.");
+    workspaceRoots = parsed;
+  } else workspaceRoots = [env.CODEX_WORKSPACE_ROOT ?? path.join(env.USERPROFILE ?? env.HOME ?? process.cwd(), "workspace")];
   return {
     host,
     port,
@@ -184,5 +193,6 @@ export function runtimeConfig(env: NodeJS.ProcessEnv = process.env): {
     rpcTimeoutMs: parseDuration("CODEX_RPC_TIMEOUT_MS", 30_000),
     shutdownTimeoutMs: parseDuration("CODEX_SHUTDOWN_TIMEOUT_MS", 2_000),
     stateFile: env.CODEX_AGENT_STATE_FILE,
+    workspaceRoots,
   };
 }

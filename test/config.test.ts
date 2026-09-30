@@ -88,6 +88,12 @@ test("Windows Codex resolver follows the current official runtime when a pinned 
   }
 });
 
+test("runtime config reads JSON workspace roots and preserves the legacy root", () => {
+  assert.deepEqual(runtimeConfig({ CODEX_WORKSPACE_ROOTS: '["C:\\\\src","D:\\\\work"]' }).workspaceRoots, ["C:\\src", "D:\\work"]);
+  assert.deepEqual(runtimeConfig({ CODEX_WORKSPACE_ROOT: "C:\\legacy" }).workspaceRoots, ["C:\\legacy"]);
+  assert.throws(() => runtimeConfig({ CODEX_WORKSPACE_ROOTS: "no-json" }), /JSON/);
+});
+
 test("Windows Codex resolver keeps an explicit custom executable", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "codex-custom-"));
   try {

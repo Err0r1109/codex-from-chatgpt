@@ -1,5 +1,11 @@
 # Validation record
 
+## Existing-thread attach and configurable development roots
+
+The bridge now lists bounded existing-thread metadata through `thread/list` with `useStateDbOnly: true`, filtering cwd through canonical authorized-root validation. `codex_task_attach` reads the exact requested thread and complete turn status, accepts only terminal history, persists ownership without starting inference, and preserves prior history for a subsequent same-thread resume. Historical count is separate from bridge `turn_count`. Configure multiple operator-owned roots with JSON `CODEX_WORKSPACE_ROOTS`; the single `CODEX_WORKSPACE_ROOT` remains the compatibility fallback.
+
+TypeScript typecheck, build and `git diff --check` passed. The full suite reported **86 tests: 85 passed, zero failed, one optional real-App-Server handshake skipped**. Coverage includes bounded/paginated thread listing with unauthorized-cwd filtering, completed-thread attach with zero bridge-managed historical turns, explicit same-thread `thread/resume` before the first attached follow-up turn, active/outside-root rejection, duplicate ownership protection, model/provider inheritance, multiple authorized roots, and junction/symlink escape rejection.
+
 ## Live tunnel and ChatGPT connection, 2026-09-30
 
 Created the dedicated Codex MCP Bridge tunnel through the official Platform UI, associated with the intended ChatGPT workspace. Existing unrelated tunnels and credentials were not reused or changed. The actual key-creation summary showed **exactly Tunnels Read and Use**, every other category **None**, and expiration **Never**, explicitly requested by the operator. A first key that could not be saved was revoked before replacement. The replacement was saved through a local masked prompt, outside the repository, with user/SYSTEM ACLs. No secret was printed. No billing activation, payment method, credit purchase or inference API request occurred.

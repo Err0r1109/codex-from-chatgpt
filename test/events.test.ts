@@ -336,16 +336,25 @@ test("modern discover, events/list, tools/call and create-subscribe-submit elimi
   const tools = (await rpc("tools/list")).result.tools;
   assert.deepEqual(tools.map((x) => x.name).sort(), [
     "codex_models_list",
+    "codex_task_attach",
     "codex_task_create",
     "codex_task_get",
     "codex_task_stop",
     "codex_task_wait",
+    "codex_threads_list",
     "codex_turn_submit",
-  ]);
+  ].sort());
   const waitTool = tools.find((x) => x.name === "codex_task_wait");
   assert.equal(waitTool.annotations.readOnlyHint, true);
   assert.equal(waitTool.annotations.idempotentHint, true);
   assert.ok(waitTool.inputSchema.required.includes("since_revision"));
+  const listThreads = tools.find((x) => x.name === "codex_threads_list");
+  assert.equal(listThreads.annotations.readOnlyHint, true);
+  assert.equal(listThreads.annotations.idempotentHint, true);
+  assert.deepEqual(listThreads.inputSchema.required ?? [], []);
+  const attach = tools.find((x) => x.name === "codex_task_attach");
+  assert.equal(attach.annotations.idempotentHint, true);
+  assert.ok(attach.inputSchema.required.includes("thread_id"));
   assert.equal((await rpc("tools/call", { name: "codex_models_list", arguments: {} })).result.structuredContent.models[0].model, "fixture");
   const created = (
     await rpc("tools/call", {

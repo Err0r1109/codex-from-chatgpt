@@ -49,6 +49,16 @@ export function createMcpServer(
     inputSchema: z.object({}).strict(),
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, () => call(() => manager.listModels()));
+  server.registerTool("codex_threads_list", {
+    description: "List bounded metadata for existing Codex threads under authorized development roots. Read-only; never returns message history.",
+    inputSchema: z.object({ limit: z.number().int().min(1).max(50).optional(), cursor: z.string().max(2048).optional(), workspace: z.string().min(1).max(4096).optional() }).strict(),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, (p) => call(() => manager.listThreads(p)));
+  server.registerTool("codex_task_attach", {
+    description: "Attach a completed existing Codex conversation as a ready durable task without starting a Codex turn. Historical turns do not consume bridge turn quota.",
+    inputSchema: z.object({ thread_id: z.string().min(1).max(200) }).strict(),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  }, (p) => call(() => manager.attach(p.thread_id)));
   server.registerTool(
     "codex_task_create",
     {

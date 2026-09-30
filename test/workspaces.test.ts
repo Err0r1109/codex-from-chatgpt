@@ -36,3 +36,15 @@ test("symlink escape is rejected after realpath", async () => {
     realpathSync(path.join(root, "valid")),
   );
 });
+
+test("multiple workspace roots accept either root and reject outside and junction escapes", async () => {
+  const one = mkdtempSync(path.join(tmpdir(), "codex-workspace-one-"));
+  const two = mkdtempSync(path.join(tmpdir(), "codex-workspace-two-"));
+  const outside = mkdtempSync(path.join(tmpdir(), "codex-workspace-outside-"));
+  const link = path.join(one, "escape");
+  symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
+  assert.equal(await validateWorkspace(one, [one, two]), realpathSync(one));
+  assert.equal(await validateWorkspace(two, [one, two]), realpathSync(two));
+  await assert.rejects(validateWorkspace(outside, [one, two]));
+  await assert.rejects(validateWorkspace(link, [one, two]));
+});

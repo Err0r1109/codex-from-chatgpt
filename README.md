@@ -11,7 +11,9 @@ Fork of [joseanu/codex-from-chatgpt](https://github.com/joseanu/codex-from-chatg
 | Tool                                                                | Purpose                                                                                                                                                                   |
 | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `codex_models_list()` | Live account model catalog: IDs, display names, supported/default reasoning efforts, visibility and availability metadata. |
+| `codex_threads_list(limit?, cursor?, workspace?)` | Bounded metadata for existing threads whose canonical cwd is within authorized roots; no history. |
 | `codex_task_create(workspace)`                                      | Validate an existing directory under the operator's root, durably prepare a task/thread, return `ready`. No turn starts.                                                  |
+| `codex_task_attach(thread_id)` | Attach a completed existing thread as a ready task; history is preserved and counts as zero bridge turns. |
 | `codex_turn_submit(task_id, prompt, request_id, expected_revision)` | Start a turn on that thread and return after acceptance. Same ID and prompt never start another turn, including after restart. Different content under the same ID fails. |
 | `codex_task_get(task_id, detail?, since_revision?)`                 | Bounded compact, standard or debug evidence. Debug includes actual command statuses/exit codes.                                                                           |
 | `codex_task_wait(task_id, since_revision, timeout_ms?)`              | Read-only Chat/Work fallback when Events are unavailable. Waits without backend polling for a supervisory revision change or attention state; default 30 s, maximum 45 s.  |
@@ -30,6 +32,8 @@ Task reads include durable `model_evidence` per turn: requested selection, resol
 When the ChatGPT host does not expose the documented Events subscription capability, keep the same Chat response alive after `codex_turn_submit` and call `codex_task_wait(task_id, since_revision, timeout_ms?)`. This is live-validated in normal Chat and is the preferred fallback; Work can use the same pattern for unusually long runs. The bridge registers an in-process waiter and wakes it when supervisory revision advances or the task reaches an approval/input/terminal state; it does not busy-poll Codex App Server. Use the returned revision for the next wait. A timeout is not a failure and consumes no Codex turn. Once terminal, read `codex_task_get`, review the evidence, and submit the next turn with a fresh request ID and current revision. This fallback uses only ordinary supported MCP tool calls; it does not wake a conversation after its response has ended.
 
 ## Run
+
+Set `CODEX_WORKSPACE_ROOTS` to a JSON array of operator-owned development roots, for example `["C:\\Users\\me\\source","D:\\projects"]`. Authorizing broad development roots once means projects underneath need no per-project configuration. The legacy `CODEX_WORKSPACE_ROOT` remains supported when the array is absent. Do not authorize an entire drive or user profile unless that scope is intentional.
 
 Requires Node 20+, installed Codex and its existing ChatGPT login. The bridge checks `account/read` before work and recovery, forces the supported ChatGPT login mode/OpenAI provider, and strips API keys, tokens and tunnel secrets from the child environment. API-key inference is rejected. It retains the installed Codex default unless the caller selects a supported model/effort. No API billing, payment or credits operation is implemented.
 
@@ -58,14 +62,15 @@ For other installations, set these before `npm start`:
 
 | Variable                      | Default / purpose                                                                                    |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `CODEX_WORKSPACE_ROOT`        | Existing operator-authorized root; default `~/workspace`. Realpath rejects symlink/junction escapes. |
+| `CODEX_WORKSPACE_ROOTS`       | JSON array of operator-authorized development roots. Canonical paths may live under any root; realpath rejects symlink/junction escapes. |
+| `CODEX_WORKSPACE_ROOT`        | Legacy single-root fallback when `CODEX_WORKSPACE_ROOTS` is absent; default `~/workspace`. |
 | `CODEX_AGENT_STATE_FILE`      | `~/.codex-agent-mcp/state.json`; must be outside the workspace.                                      |
 | `HOST`, `PORT`                | `127.0.0.1`, `8787`; executable rejects non-loopback, including the old opt-in.                      |
 | `CODEX_BIN`                   | Optional Codex executable. On Windows, stale official versioned paths are reconciled against the current official Codex runtime; ambiguous runtime selection fails closed. |
 | `CODEX_AGENT_MAX_TURNS`       | 8, operator-owned and persisted. Reaching it emits `limit_reached`; deliberate new task required.    |
 | `CODEX_AGENT_TURN_TIMEOUT_MS` | 1800000. Deadline requests interruption; uncertain terminal outcome becomes recovery-required.       |
 
-The prepared configuration authorizes only `%USERPROFILE%\codex-bridge-disposable`. Change it deliberately in the private operator config. Never authorize a parent containing bridge source, configuration, state or tunnel secrets.
+The prepared Windows configuration can authorize broad development roots through private `workspaceRoots`, so projects underneath need no per-project setup. Keep configuration/state/tunnel-secret directories outside those roots and avoid authorizing an entire drive or user profile unless that scope is intentional.
 
 ## Human approvals/input
 

@@ -50,6 +50,7 @@ export type PersistedJob = {
   activity?: string | null;
   completion_report_injected?: boolean;
   turn_count?: number;
+  historical_turn_count?: number;
   requests?: Record<
     string,
     { hash: string; hash_version?: 2; turn_id: string | null; previous_turn_id?: string | null }
@@ -136,6 +137,8 @@ function validJob(value: unknown): value is PersistedJob {
       typeof value.completion_report_injected === "boolean") &&
     (value.turn_count === undefined ||
       (Number.isInteger(value.turn_count) && Number(value.turn_count) >= 0)) &&
+    (value.historical_turn_count === undefined ||
+      (Number.isInteger(value.historical_turn_count) && Number(value.historical_turn_count) >= 0)) &&
     (value.stopped === undefined || typeof value.stopped === "boolean") &&
     (value.deadline === undefined ||
       value.deadline === null ||

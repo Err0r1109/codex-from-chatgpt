@@ -56,6 +56,7 @@ type PendingApproval = {
 
 type JobRecord = {
   settings: Settings | null;
+  historicalTurnCount: number;
   modelEvidence: TurnModelEvidence[];
   turnCount: number;
   requests: Record<
@@ -148,6 +149,7 @@ export type JobSnapshot = {
   pending_input?: unknown;
   task_id?: string;
   turn_count?: number;
+  historical_turn_count?: number;
   recovery_required?: boolean;
   stopped?: boolean;
   status: JobStatus;
@@ -195,6 +197,7 @@ export type JobManagerOptions = {
   store?: StateStore;
   maxTurns?: number;
   turnTimeoutMs?: number;
+  workspaceRoots?: string[];
 };
 
 export const COMPLETION_REPORT_MARKER =
@@ -741,6 +744,7 @@ export class JobManager {
   private operation: Promise<void> = Promise.resolve();
   private readonly maxTurns: number;
   private readonly turnTimeoutMs: number;
+  private readonly workspaceRoots?: string[];
   private readonly deadlines = new Map<string, NodeJS.Timeout>();
   private readonly loadedThreads = new Set<string>();
   private readonly waiters = new Map<string, Set<() => void>>();
@@ -754,6 +758,7 @@ export class JobManager {
     options: JobManagerOptions = {},
   ) {
     this.store = options.store ?? new StateStore();
+    this.workspaceRoots = options.workspaceRoots;
     this.maxTurns =
       options.maxTurns ?? Number(process.env.CODEX_AGENT_MAX_TURNS ?? 8);
     this.turnTimeoutMs =
@@ -791,7 +796,7 @@ export class JobManager {
   }
 
   async create(workspace: string, selection: Selection = {}): Promise<JobStartResult> {
-    const canonicalWorkspace = await validateWorkspace(workspace);
+    const canonicalWorkspace = await validateWorkspace(workspace, this.workspaceRoots);
     const stateRelative = path.relative(
       canonicalWorkspace,
       this.store.filePath,
@@ -807,6 +812,7 @@ export class JobManager {
       const resolved = await this.catalog.resolve(selection, null, canonicalWorkspace);
       const job: JobRecord = {
         settings: null,
+        historicalTurnCount: 0,
         modelEvidence: [],
         turnCount: 0,
         requests: {},
@@ -885,6 +891,75 @@ export class JobManager {
     });
   }
 
+  async listThreads(options: { limit?: number; cursor?: string; workspace?: string } = {}): Promise<object> {
+    await this.withExclusive(async () => { await this.ensureReady(); });
+    const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 20)));
+    if (!Number.isFinite(limit)) throw new Error("Invalid limit");
+    let workspace: string | undefined;
+    if (options.workspace) workspace = await validateWorkspace(options.workspace, this.workspaceRoots);
+    const response = await this.appServer.request<unknown>("thread/list", {
+      limit, useStateDbOnly: true, ...(options.cursor ? { cursor: options.cursor } : {}),
+    });
+    if (!isObject(response) || !Array.isArray(response.data)) throw new Error("Invalid thread/list response");
+    const threads = [];
+    for (const raw of response.data) {
+      if (!isObject(raw) || typeof raw.id !== "string" || typeof raw.cwd !== "string") continue;
+      let cwd: string;
+      try { cwd = await validateWorkspace(raw.cwd, this.workspaceRoots); } catch { continue; }
+      if (workspace && cwd !== workspace && !cwd.startsWith(`${workspace}${path.sep}`)) continue;
+      const git = isObject(raw.gitInfo) ? raw.gitInfo : {};
+      const source = isObject(raw.source) ? raw.source : null;
+      const status = isObject(raw.status) ? raw.status.type : raw.status;
+      threads.push({
+        thread_id: raw.id, cwd, preview: typeof raw.preview === "string" ? raw.preview.slice(0, 240) : "",
+        ...(typeof raw.model === "string" ? { model: raw.model } : {}),
+        ...(typeof raw.reasoningEffort === "string" ? { reasoning_effort: raw.reasoningEffort } : {}),
+        ...(typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt) ? { updated_at: new Date(raw.updatedAt * 1000).toISOString() } : typeof raw.updatedAt === "string" ? { updated_at: raw.updatedAt } : {}),
+        ...(source?.type !== undefined ? { originator: source.type } : raw.source !== undefined ? { originator: raw.source } : {}),
+        ...(status !== undefined ? { status } : {}),
+        ...(typeof git.branch === "string" ? { git_branch: git.branch } : {}),
+        ...(typeof git.sha === "string" ? { git_sha: git.sha } : {}),
+      });
+    }
+    return { threads, ...(typeof response.nextCursor === "string" ? { next_cursor: response.nextCursor } : {}) };
+  }
+
+  async attach(threadId: string): Promise<JobStartResult & { historical_turn_count: number }> {
+    return this.withExclusive(async () => {
+      await this.ensureReady();
+      this.assertNoActiveTurn();
+      const existingId = this.jobsByThread.get(threadId);
+      if (existingId) return { ...this.startResult(this.getJob(existingId)), historical_turn_count: this.getJob(existingId).historicalTurnCount };
+      await requireChatGPT(this.appServer);
+      const read = await this.appServer.request<unknown>("thread/read", { threadId, includeTurns: true });
+      const thread = isObject(read) && isObject(read.thread) ? read.thread : null;
+      if (!thread || thread.id !== threadId) throw new Error("thread/read did not confirm the requested thread");
+      if (typeof thread.cwd !== "string" || !path.isAbsolute(thread.cwd)) throw new Error("Existing thread has missing or invalid cwd");
+      const workspace = await validateWorkspace(thread.cwd, this.workspaceRoots);
+      const turns = Array.isArray(thread.turns) ? thread.turns.filter(isObject) : [];
+      const latest = turns.at(-1);
+      if (latest && !isTerminal(latest.status)) throw new Error(`Cannot attach thread with nonterminal or ambiguous latest turn status: ${String(latest.status)}`);
+      const job: JobRecord = {
+        settings: null, historicalTurnCount: turns.length, modelEvidence: [], turnCount: 0, requests: {}, stopped: false,
+        deadline: null, commandEvidence: [], jobId: randomUUID(), threadId, workspace,
+        turnId: latest && typeof latest.id === "string" ? latest.id : null, status: "ready",
+        finalMessage: null, latestDiff: null, filesChanged: [], commandsExecuted: [], error: null,
+        pendingApprovals: new Map(), lastAgentMessage: null, agentMessages: new Map(), revision: 0,
+        activity: null, validation: [], warnings: [], completionReportInjected: false, revisionFingerprint: "", updatedAt: new Date().toISOString(),
+      };
+      if (typeof thread.model === "string") job.settings = {
+        model: thread.model, reasoning_effort: typeof thread.reasoningEffort === "string" ? thread.reasoningEffort : null,
+        ...(typeof thread.modelProvider === "string" ? { model_provider: thread.modelProvider } : {}), source: "thread/read",
+      };
+      if (job.settings?.model_provider && job.settings.model_provider !== "openai") throw new Error("Only ChatGPT-authenticated OpenAI Codex is permitted");
+      this.touch(job);
+      this.jobs.set(job.jobId, job);
+      this.attachThread(job, threadId);
+      this.persist(job, true);
+      return { ...this.startResult(job), historical_turn_count: turns.length };
+    });
+  }
+
   // Internal compatibility for upstream regression tests; these are not MCP tools.
   async start(workspace: string, prompt: string): Promise<JobStartResult> {
     this.validatePrompt(prompt);
@@ -958,7 +1033,7 @@ export class JobManager {
         throw new Error(
           "el job aún no tiene un thread confirmado; requiere reconciliación.",
         );
-      await validateWorkspace(job.workspace);
+      await validateWorkspace(job.workspace, this.workspaceRoots);
       if (!this.loadedThreads.has(job.threadId)) {
         await requireChatGPT(this.appServer);
         const resumed = await this.appServer.request<unknown>("thread/resume", {
@@ -982,7 +1057,7 @@ export class JobManager {
         const turns = Array.isArray(resumed.thread.turns)
           ? resumed.thread.turns.filter(isObject)
           : [];
-        if (turns.some((t) => t.status === "inProgress")) {
+        if (turns.some((t) => !isTerminal(t.status))) {
           this.setRecoveryRequired(
             job,
             new Error("Unexpected active turn on resume"),
@@ -1103,7 +1178,7 @@ export class JobManager {
   }
 
   async authorizeTask(jobId: string): Promise<void> {
-    await validateWorkspace(this.getJob(jobId).workspace);
+    await validateWorkspace(this.getJob(jobId).workspace, this.workspaceRoots);
   }
 
   async respondInput(
@@ -1299,7 +1374,7 @@ export class JobManager {
     mayResume: boolean,
   ): Promise<void> {
     try {
-      job.workspace = await validateWorkspace(job.workspace);
+      job.workspace = await validateWorkspace(job.workspace, this.workspaceRoots);
       const response = await this.appServer.request<unknown>("thread/read", {
         threadId: job.threadId,
         includeTurns: true,
@@ -1314,6 +1389,17 @@ export class JobManager {
         ? thread.turns.filter(isObject)
         : [];
       const latest = turns.at(-1);
+      if (thread.model && typeof thread.model === "string") {
+        job.settings = {
+          model: thread.model,
+          reasoning_effort: typeof thread.reasoningEffort === "string" ? thread.reasoningEffort : null,
+          ...(typeof thread.modelProvider === "string" ? { model_provider: thread.modelProvider } : {}),
+          source: "thread/read",
+        };
+      }
+      if (job.settings?.model_provider && job.settings.model_provider !== "openai")
+        throw new Error("Only ChatGPT-authenticated OpenAI Codex is permitted");
+      job.historicalTurnCount = turns.length;
       const unresolved = Object.values(job.requests).filter(
         (r) => r.turn_id === null,
       );
@@ -1421,6 +1507,7 @@ export class JobManager {
     );
     const job: JobRecord = {
       settings: value.thread_settings ?? null,
+      historicalTurnCount: value.historical_turn_count ?? 0,
       modelEvidence: value.model_evidence ?? [],
       turnCount: value.turn_count ?? this.maxTurns,
       requests: value.requests ?? {},
@@ -1998,6 +2085,7 @@ export class JobManager {
     return JSON.stringify({
       settings: job.settings,
       modelEvidence: job.modelEvidence,
+      historicalTurnCount: job.historicalTurnCount,
       stopped: job.stopped,
       turnCount: job.turnCount,
       threadId: job.threadId,
@@ -2056,6 +2144,7 @@ export class JobManager {
       updated_at: job.updatedAt,
       revision: job.revision,
       turn_count: job.turnCount,
+      historical_turn_count: job.historicalTurnCount,
       requests: job.requests,
       stopped: job.stopped,
       deadline: job.deadline,
@@ -2169,6 +2258,7 @@ export class JobManager {
       job_id: job.jobId,
       task_id: job.jobId,
       turn_count: job.turnCount,
+      historical_turn_count: job.historicalTurnCount,
       recovery_required: job.status === "recovery_required",
       stopped: job.stopped,
     };
