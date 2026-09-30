@@ -160,3 +160,13 @@ Validation evidence:
 - No Codex worker/model turn was invoked to implement or validate this sentinel change.
 
 This section records deterministic/unit/integration readiness only. The final acceptance still requires a real ChatGPT conversation to end its response, Codex to complete later, the local sentinel to post a new wake message into that same conversation, and a fresh ChatGPT run to resume orchestration without an intermediate human message.
+
+### Live browser-wake acceptance, 2026-09-30
+
+A live synthetic ChatGPT conversation validated the browser wake path end-to-end without invoking Codex. The target conversation was preconfigured to reply exactly `WAKEOK` to a later automated `[Codex Bridge wake ...]` user message and to use no tools. The production browser-wake code was then run against a temporary durable StateStore and the real Local Browser Bridge MCP transport.
+
+The first `browser_open_tab` returned LBB `AMBIGUOUS_OUTCOME`; the sentinel correctly persisted the uncertain action and did not retry blindly. On the next cycle it reconciled the same deterministic client request through `browser_operation`, recovered the executed tab creation and provenance, verified the canonical conversation URL, proved the composer empty, appended the exact fixed wake envelope, reprobed for concurrent edits, submitted once, verified the rendered user message and empty composer, and persisted `state=delivered`, `stage=verified`. Later ticks performed no further send.
+
+ChatGPT then started a fresh run from that delivered browser message and rendered exactly `WAKEOK` as instructed. This establishes the local sleep/wake mechanism independently of a long-lived Sol response: a deterministic local process can post a new message into a completed ChatGPT conversation and trigger a new model run. No Codex model turn or API inference was consumed by this acceptance.
+
+The remaining acceptance is specifically Codex-backed orchestration: an explicitly user-authorized Codex task should end the initiating ChatGPT response, complete later, generate the durable wake from real task state, and let the newly triggered ChatGPT run read `codex_task_get` and continue the same authorized task. Because the bridge is USER-OPT-IN ONLY, that final test must not be started without a fresh explicit user instruction to use Codex for the acceptance test.
