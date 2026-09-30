@@ -18,6 +18,16 @@ These are observed limits of the two tested conversation hosts, not a claim that
 
 **Acceptance remains blocked at subscription, before turn one.** No live ChatGPT webhook, callback verification, event-triggered task read, second turn, event-run model, write-tool confirmation or chat-lifecycle subscription survival was verified. The model names above are UI selections; no event run occurred, so they are not asserted as actual event-execution models. Existing real two-model App Server results below remain separate evidence.
 
+## Windows operational resilience, 2026-09-30
+
+Added an authenticated loopback operator-control endpoint on port 18888 for headless operation. Its bearer token is generated locally, stored under `%LOCALAPPDATA%\CodexMcpBridge` with inheritance disabled and access limited to the current user/SYSTEM, stripped from the Codex child environment, and never exposed through MCP or the Secure MCP Tunnel. Browser-origin requests are rejected. The CLI exposes only status, exact task inspection, exact approval/input correlation and graceful stop; there is no generic shell or approve-all operation.
+
+Installed the per-user **Codex MCP Bridge Supervisor** Scheduled Task with an at-logon trigger, limited user privileges, no execution time limit, one-minute restart interval and ten supervisor restart attempts. The supervisor starts a missing bridge and reconnects the official managed tunnel only when its runtime process is absent. A live but temporarily unready tunnel is not killed, leaving ordinary network reconnection to tunnel-client itself.
+
+Live fault injection passed without a Codex turn: killing bridge PID 10868 resulted in supervised replacement PID 13756; killing tunnel runtime PID 12768 resulted in official managed replacement PID 4924, which returned to ready. Deliberate `service.ps1 stop` then remained paused across repeated checks with both bridge and tunnel down; `service.ps1 start` cleared the persistent pause marker and returned the supervisor, bridge and tunnel to ready. The existing ChatGPT plugin/tunnel identity was reused.
+
+Final operational-hardening validation: PowerShell parsing, TypeScript typecheck and build passed; the suite reported **74 tests: 73 passed, zero failed, one optional real-App-Server handshake skipped**. The new operator-control test covers missing authentication, browser-origin rejection, exact inspect/approval/input dispatch and graceful stop. No Codex model turn was used for this hardening work.
+
 ## Model selection correction, 2026-09-30
 
 Removed the automatic Luna resolver. `codex_models_list` reads current `model/list`, including hidden/availability metadata; every new task/turn validates explicit model/effort against a fresh catalog. Default, exact efforts, minimum/maximum aliases and same-thread switching are covered. Selection enters the durable idempotency identity. Unknown actual settings remain unknown; the bridge never relabels requested settings as execution evidence.

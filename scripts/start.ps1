@@ -13,6 +13,18 @@ $env:CODEX_AGENT_TURN_TIMEOUT_MS = [string]$config.turnTimeoutMs
 $env:PORT = [string]$config.port
 $env:HOST = '127.0.0.1'
 $env:CODEX_BIN = $config.codexBin
+$tokenFile = Join-Path $runtime 'operator-token.txt'
+if (!(Test-Path -LiteralPath $tokenFile)) {
+  $bytes = New-Object byte[] 32
+  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+  $token = ([BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
+  [IO.File]::WriteAllText($tokenFile, $token, [Text.UTF8Encoding]::new($false))
+}
+& icacls.exe $tokenFile /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):F" '*S-1-5-18:F' | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Cannot protect operator control token ACL' }
+$env:CODEX_OPERATOR_TOKEN_FILE = $tokenFile
+$env:CODEX_OPERATOR_PORT = [string]([int]$config.port + 1)
 $lockFile = "$env:CODEX_AGENT_STATE_FILE.lock"
 if (Test-Path -LiteralPath $lockFile) {
   $ownerPid = [int](Get-Content -LiteralPath $lockFile -Raw)

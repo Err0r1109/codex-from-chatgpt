@@ -3,6 +3,7 @@ import {
   mkdirSync,
   openSync,
   closeSync,
+  readFileSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -16,6 +17,7 @@ import { createBridgeHandler } from "./mcp.js";
 import { StateStore } from "./store.js";
 import { EventService } from "./events.js";
 import { makePrivate } from "./private-files.js";
+import { startOperatorControl } from "./operator-control.js";
 
 import { requireChatGPT } from "./models.js";
 
@@ -79,11 +81,15 @@ async function main() {
         res.end();
       }
     });
+    let operatorControl:
+      | { close: () => Promise<void>; port: number }
+      | undefined;
     let closing = false;
     const shutdown = async () => {
       if (closing) return;
       closing = true;
       events?.stop();
+      await operatorControl?.close();
       await handler.close();
       await appServer.stop();
       httpServer.closeAllConnections();
@@ -151,6 +157,22 @@ async function main() {
       httpServer.once("error", reject);
       httpServer.listen(config.port, config.host, resolve);
     });
+    const operatorTokenFile = process.env.CODEX_OPERATOR_TOKEN_FILE?.trim();
+    if (operatorTokenFile) {
+      makePrivate(operatorTokenFile);
+      const token = readFileSync(operatorTokenFile, "utf8").trim();
+      const operatorPort = Number(
+        process.env.CODEX_OPERATOR_PORT ?? config.port + 1,
+      );
+      operatorControl = await startOperatorControl(jobs, {
+        port: operatorPort,
+        token,
+        shutdown,
+      });
+      console.error(
+        `Operator control: http://127.0.0.1:${operatorControl.port}`,
+      );
+    }
     events.start();
     console.error(`Codex MCP Bridge: http://${config.host}:${config.port}/mcp`);
   } catch (e) {

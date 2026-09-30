@@ -37,7 +37,19 @@ npm test
 .\scripts\start.ps1
 ```
 
-On this Windows installation, operator configuration is `%LOCALAPPDATA%\CodexMcpBridge\config.json`, outside authorized workspaces. Health: `http://127.0.0.1:18887/healthz` and `/readyz`. Type `stop` in the operator console or press Ctrl+C to stop cleanly. The lock prevents concurrent writers. After abrupt exit, startup removes a stale lock only if its recorded process is absent, then reconciles through app-server; uncertain turns are never replayed.
+On this Windows installation, operator configuration is `%LOCALAPPDATA%\CodexMcpBridge\config.json`, outside authorized workspaces. Health: `http://127.0.0.1:18887/healthz` and `/readyz`. The lock prevents concurrent writers. After abrupt exit, startup removes a stale lock only if its recorded process is absent, then reconciles through app-server; uncertain turns are never replayed.
+
+### Windows autostart and service control
+
+Install the per-user logon supervisor once:
+
+```powershell
+.\scripts\service.ps1 install
+```
+
+It keeps the bridge available and starts the official managed tunnel runtime if that runtime process is actually absent. A live-but-temporarily-unready tunnel is left to its own reconnect logic instead of being flapped. The Scheduled Task runs with limited user privileges, has no execution time limit, and restarts the supervisor after failure.
+
+Use `service.ps1 status|start|stop|restart|uninstall`. A deliberate `stop` creates a persistent pause marker, stops the supervisor, tunnel and bridge, and therefore is not undone by the watchdog. `start` clears the marker and restores the stack.
 
 For other installations, set these before `npm start`:
 
@@ -56,16 +68,16 @@ The prepared configuration authorizes only `%USERPROFILE%\codex-bridge-disposabl
 
 No approval MCP tool is exposed. Documented tool annotations are not a server-verifiable human confirmation proof; no live host test established such a boundary here. Model-supplied approval is insufficient.
 
-An actual local TTY exposes the small operator console:
+Human-only operations are available through the local operator console when started interactively, and through the authenticated loopback control CLI when the bridge runs headless:
 
-```text
-inspect TASK_ID
-approve TASK_ID REQUEST_ID accept
-approve TASK_ID REQUEST_ID decline
-input TASK_ID REQUEST_ID {"question_id":{"answers":["answer"]}}
+```powershell
+.\scripts\control.ps1 status
+.\scripts\control.ps1 inspect TASK_ID
+.\scripts\control.ps1 approve TASK_ID REQUEST_ID accept
+.\scripts\control.ps1 input TASK_ID REQUEST_ID '{"question_id":{"answers":["answer"]}}'
 ```
 
-Inspect the pending operation first. Quote numeric-looking string request IDs as JSON; numeric/string IDs differ. Structured Codex permission decisions can replace `accept`. Exact pending request and decision-shape validation remain mandatory. There is no approve-all endpoint. Without a TTY there is no approval entry point: launch in a local terminal when human interaction may be needed. Never reuse pre-crash approvals against a new connection.
+The control endpoint binds only to loopback, rejects browser-origin requests and requires a random token stored in the private runtime directory with user/SYSTEM ACLs. It is not exposed through MCP or the tunnel. Inspect the pending operation first. Quote numeric-looking string request IDs as JSON; numeric/string IDs differ. Structured Codex permission decisions can replace `accept`. Exact pending request and decision-shape validation remain mandatory. There is no approve-all endpoint. Never reuse pre-crash approvals against a new connection.
 
 ## ChatGPT / Secure MCP Tunnel
 
