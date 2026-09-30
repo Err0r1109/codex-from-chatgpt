@@ -103,6 +103,24 @@ test("happy path start -> completed keeps a compact summary", async () => {
   assert.equal(snapshot.latest_diff, "diff --git a/a b/a");
 });
 
+test("wait holds a running task until attention or bounded timeout", async () => {
+  const { fake, manager } = managerFixture();
+  const started = await manager.start(workspace, "espera a que termine");
+  const waiting = manager.wait(started.job_id, 1_000);
+  setTimeout(() => completed(fake), 50);
+  const finished = await waiting;
+  assert.equal(finished.status, "completed");
+  assert.equal(finished.wait_timed_out, false);
+  assert.ok(finished.waited_ms >= 0);
+
+  const second = managerFixture();
+  const running = await second.manager.start(workspace, "sigue trabajando");
+  const timedOut = await second.manager.wait(running.job_id, 250);
+  assert.equal(timedOut.status, "running");
+  assert.equal(timedOut.wait_timed_out, true);
+  assert.ok(timedOut.waited_ms >= 250);
+});
+
 test("codex_get detail modes keep standard supervisory data separate from debug data", async () => {
   const { fake, manager } = managerFixture();
   const started = await manager.start(workspace, "reporta el estado");

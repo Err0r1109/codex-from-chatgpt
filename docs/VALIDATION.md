@@ -90,3 +90,9 @@ The live setup section above supersedes the former missing Platform authorizatio
 - Actual event-run model, host tool confirmations and chat-lifecycle subscription survival.
 
 Synthetic webhook acceptance is never substituted for host execution. The bridge is left ready for a ChatGPT host that exposes the documented subscription capability.
+
+## Work fallback while host Events are unavailable
+
+Added bridge version 0.5.1 with read-only `codex_task_wait`. It waits in-memory for up to 20 seconds for a task to complete or enter an attention state; it never polls Codex App Server and never starts a Codex turn. A timeout returns the current compact state with `wait_timed_out: true`, allowing the same ChatGPT Work response to call it again. The normal MCP Events path remains unchanged and preferred when the host eventually exposes `events/subscribe`.
+
+TypeScript typecheck/build passed. The full wrapper suite passed **75 tests: 74 passed, zero failed, one optional real-App-Server handshake skipped**. Coverage includes wait-until-completion, bounded timeout, and the MCP tool surface. No live Codex inference was used to implement or validate this fallback.

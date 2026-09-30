@@ -31,12 +31,12 @@ export function createMcpServer(
   // Events is the documented OpenAI draft extension, not yet in SDK capability types.
   const capabilities = { tools: {}, events: {} };
   const server = new McpServer(
-    { name: "Codex MCP Bridge", version: "0.5.0" },
+    { name: "Codex MCP Bridge", version: "0.5.1" },
     {
       capabilities,
       supportedProtocolVersions: ["2026-07-28"],
       instructions:
-        "Create a task, subscribe to codex.task_changed for its task_id, then submit the first turn. Read task evidence after each event. Submit follow-up turns only within the user's authorized work, with a unique request_id and current expected_revision. The bridge does not choose prompts. Codex approvals require the local operator.",
+        "Prefer MCP Events: create a task, subscribe to codex.task_changed, then submit. If this ChatGPT host cannot subscribe to Events, keep the same Work response active and use codex_task_wait repeatedly until Codex completes or needs attention; then read evidence and submit the next turn. Never require the user to relay Codex output. Codex approvals require the local operator.",
     },
   );
   const task_id = z.string().uuid();
@@ -115,6 +115,30 @@ export function createMcpServer(
       call(async () => {
         await manager.authorizeTask(p.task_id);
         return manager.get(p.task_id, p);
+      }),
+  );
+  server.registerTool(
+    "codex_task_wait",
+    {
+      description:
+        "Fallback for ChatGPT hosts without MCP Events. Wait read-only for up to 20 seconds until this task becomes ready, completes, fails, needs approval/input, or otherwise requires attention. If wait_timed_out=true, call it again in the SAME ChatGPT response. Do not ask the user to relay status.",
+      inputSchema: z
+        .object({
+          task_id,
+          timeout_ms: z.number().int().min(250).max(20_000).default(15_000),
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    (p) =>
+      call(async () => {
+        await manager.authorizeTask(p.task_id);
+        return manager.wait(p.task_id, p.timeout_ms);
       }),
   );
   server.registerTool(

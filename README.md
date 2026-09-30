@@ -4,7 +4,7 @@ Private transport between ChatGPT (orchestrator/reviewer) and local Codex (progr
 
 Fork of [joseanu/codex-from-chatgpt](https://github.com/joseanu/codex-from-chatgpt), originally authored by Antonio Ulloa. The upstream MIT [LICENSE](LICENSE) is retained. Keep the `upstream` Git remote.
 
-**Status:** the MCP 2.0 server, durable events and real Codex two-turn workflow are validated locally. The official tunnel is running and ChatGPT has discovered all five tools and `codex.task_changed` in the connected private plugin. Real Chat and Work acceptance attempts stopped before submission: those conversation hosts did not expose event subscription. Automatic continuation is **not verified**. See [validation evidence](docs/VALIDATION.md).
+**Status:** the MCP 2.0 server, durable events and real Codex two-turn workflow are validated locally. The official tunnel is running. ChatGPT host-side `events/subscribe` is still unavailable in the tested Chat/Work surfaces, so true asynchronous wake-up remains unverified. As an official-tool fallback, `codex_task_wait` keeps one ChatGPT Work response active while Codex runs, allowing Sol to wait, review and submit follow-up turns without user relay or polling the Codex backend. See [validation evidence](docs/VALIDATION.md).
 
 ## Contract
 
@@ -14,6 +14,7 @@ Fork of [joseanu/codex-from-chatgpt](https://github.com/joseanu/codex-from-chatg
 | `codex_task_create(workspace)`                                      | Validate an existing directory under the operator's root, durably prepare a task/thread, return `ready`. No turn starts.                                                  |
 | `codex_turn_submit(task_id, prompt, request_id, expected_revision)` | Start a turn on that thread and return after acceptance. Same ID and prompt never start another turn, including after restart. Different content under the same ID fails. |
 | `codex_task_get(task_id, detail?, since_revision?)`                 | Bounded compact, standard or debug evidence. Debug includes actual command statuses/exit codes.                                                                           |
+| `codex_task_wait(task_id, timeout_ms?)`                              | Read-only Work fallback when Events are unavailable. Waits up to 20 seconds for completion/attention; timeout means call it again in the same ChatGPT response.            |
 | `codex_task_stop(task_id)`                                          | Durably stop the task and interrupt its exact active turn. Later submissions are blocked.                                                                                 |
 
 Create → subscribe → submit. Both create and submit accept optional `model` and `reasoning_effort`. Choose model IDs from `codex_models_list`; exact display names and unambiguous single-word names also work. Ambiguous names fail. `minimum`/`maximum` select the lowest/highest advertised effort; unknown future effort labels require an exact selection. Every new submission revalidates against live `model/list`. No model list is hardcoded.
@@ -25,6 +26,8 @@ Use a stable logical request ID, such as `review-TASK-OBSERVED_REVISION`, and ig
 Task reads include durable `model_evidence` per turn: requested selection, resolved arguments, and separately `effective` runtime settings with a protocol source. `thread/settings/updated` confirms overrides; omitted overrides inherit the previously confirmed thread settings. Missing runtime evidence stays null. A `model/rerouted` notification records the actual replacement model without inventing its unreported effort.
 
 `events/list`, `events/subscribe` and `events/unsubscribe` share `/mcp`. Event `codex.task_changed` takes `{ "task_id": "UUID" }`. Payload: task ID, revision, status, reason and optional turn ID; no prompt, transcript, instructions or diff.
+
+When the ChatGPT host does not expose the documented Events subscription capability, keep the same Work response alive after `codex_turn_submit` and call `codex_task_wait` with a bounded timeout until it returns a completion or attention state. A timeout is not a failure and does not consume another Codex turn: call the wait tool again. Once terminal, read `codex_task_get`, review the evidence, and submit the next turn with a fresh request ID and current revision. This fallback uses only ordinary supported MCP tool calls; it does not wake a conversation after its response has ended.
 
 ## Run
 

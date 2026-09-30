@@ -627,6 +627,19 @@ function isActiveStatus(status: JobStatus): boolean {
   );
 }
 
+function isWaitBoundaryStatus(status: JobStatus): boolean {
+  return (
+    status === "ready" ||
+    status === "input_required" ||
+    status === "awaiting_approval" ||
+    status === "completed" ||
+    status === "interrupted" ||
+    status === "failed" ||
+    status === "recovery_required" ||
+    status === "limit_reached"
+  );
+}
+
 function isAmbiguousThreadStartError(error: unknown): boolean {
   return isObject(error) && error.code === -32002;
 }
@@ -1130,6 +1143,40 @@ export class JobManager {
       this.persist(job, true);
       return this.snapshot(job);
     });
+  }
+
+  async wait(
+    jobId: string,
+    timeoutMs = 15_000,
+  ): Promise<JobSnapshot & { wait_timed_out: boolean; waited_ms: number }> {
+    if (
+      !Number.isInteger(timeoutMs) ||
+      timeoutMs < 250 ||
+      timeoutMs > 20_000
+    )
+      throw new Error("timeout_ms must be an integer between 250 and 20000");
+    const started = Date.now();
+    while (true) {
+      const snapshot = this.get(jobId, { detail: "compact" });
+      if (isWaitBoundaryStatus(snapshot.status) || snapshot.stopped) {
+        return {
+          ...snapshot,
+          wait_timed_out: false,
+          waited_ms: Date.now() - started,
+        };
+      }
+      const elapsed = Date.now() - started;
+      if (elapsed >= timeoutMs) {
+        return {
+          ...snapshot,
+          wait_timed_out: true,
+          waited_ms: elapsed,
+        };
+      }
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, Math.min(250, timeoutMs - elapsed)),
+      );
+    }
   }
 
   get(jobId: string, options: JobGetOptions = {}): JobSnapshot {
