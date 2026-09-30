@@ -4,7 +4,7 @@ Private transport between ChatGPT (orchestrator/reviewer) and local Codex (progr
 
 Fork of [joseanu/codex-from-chatgpt](https://github.com/joseanu/codex-from-chatgpt), originally authored by Antonio Ulloa. The upstream MIT [LICENSE](LICENSE) is retained. Keep the `upstream` Git remote.
 
-**Status:** the MCP 2.0 server, durable events and real Codex two-turn workflow are validated locally. The official tunnel is running. ChatGPT host-side `events/subscribe` is still unavailable in the tested Chat/Work surfaces, so true asynchronous wake-up remains unverified. As an official-tool fallback, `codex_task_wait` keeps one ChatGPT Work response active while Codex runs, allowing Sol to wait, review and submit follow-up turns without user relay or polling the Codex backend. See [validation evidence](docs/VALIDATION.md).
+**Status:** the MCP 2.0 server, durable events and real Codex two-turn workflow are validated locally. The official tunnel is running. ChatGPT host-side `events/subscribe` is still unavailable in the tested Chat/Work surfaces, so true asynchronous wake-up remains unverified. The official-tool fallback `codex_task_wait` is now live-validated in ChatGPT Work: one Work run completed two Codex turns on the same thread, reviewed the first result and submitted the second automatically, with no user message or manual relay between turns. See [validation evidence](docs/VALIDATION.md).
 
 ## Contract
 
