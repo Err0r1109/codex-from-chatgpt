@@ -6,7 +6,13 @@ $configFile = Join-Path $runtime 'config.json'
 if (!(Test-Path -LiteralPath $configFile)) { throw 'Missing operator configuration: see README.md' }
 $config = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
 if ($Status) { Invoke-RestMethod "http://127.0.0.1:$($config.port)/readyz"; exit }
-$env:CODEX_WORKSPACE_ROOT = $config.workspaceRoot
+if ($config.workspaceRoots -and @($config.workspaceRoots).Count -gt 0) {
+  $env:CODEX_WORKSPACE_ROOTS = ConvertTo-Json -InputObject @($config.workspaceRoots) -Compress
+  Remove-Item Env:CODEX_WORKSPACE_ROOT -ErrorAction SilentlyContinue
+} else {
+  $env:CODEX_WORKSPACE_ROOT = $config.workspaceRoot
+  Remove-Item Env:CODEX_WORKSPACE_ROOTS -ErrorAction SilentlyContinue
+}
 $env:CODEX_AGENT_STATE_FILE = Join-Path $runtime 'state.json'
 $env:CODEX_AGENT_MAX_TURNS = [string]$config.maxTurns
 $env:CODEX_AGENT_TURN_TIMEOUT_MS = [string]$config.turnTimeoutMs
