@@ -66,7 +66,14 @@ export type PersistedJob = {
     { hash: string; hash_version?: 2 | 3; turn_id: string | null; previous_turn_id?: string | null; wake?: "browser" | "none" | "events" }
   >;
   stopped?: boolean;
-  wake?: { enabled: boolean; conversation_url: string | null; binding_marker: string };
+  wake?: {
+    enabled: boolean;
+    conversation_url: string | null;
+    conversation_id?: string | null;
+    host_session_id?: string | null;
+    binding_source?: "direct" | "session" | "recovered" | "marker";
+    binding_marker: string;
+  };
   deadline?: number | null;
 };
 
@@ -159,7 +166,19 @@ function validJob(value: unknown): value is PersistedJob {
     (value.historical_turn_count === undefined ||
       (Number.isInteger(value.historical_turn_count) && Number(value.historical_turn_count) >= 0)) &&
     (value.stopped === undefined || typeof value.stopped === "boolean") &&
-    (value.wake === undefined || (isObject(value.wake) && typeof value.wake.enabled === "boolean" && optionalNullableString(value.wake.conversation_url) && typeof value.wake.binding_marker === "string" && /^CW-BIND-[0-9a-f-]{36}$/.test(value.wake.binding_marker) && (value.wake.conversation_url === null || typeof value.wake.conversation_url === "string" && conversationUrl.test(value.wake.conversation_url)))) &&
+    (value.wake === undefined || (
+      isObject(value.wake) &&
+      typeof value.wake.enabled === "boolean" &&
+      optionalNullableString(value.wake.conversation_url) &&
+      optionalNullableString(value.wake.conversation_id) &&
+      optionalNullableString(value.wake.host_session_id) &&
+      (value.wake.binding_source === undefined || ["direct", "session", "recovered", "marker"].includes(String(value.wake.binding_source))) &&
+      typeof value.wake.binding_marker === "string" &&
+      /^CW-BIND-[0-9a-f-]{36}$/.test(value.wake.binding_marker) &&
+      (value.wake.conversation_url === null || typeof value.wake.conversation_url === "string" && conversationUrl.test(value.wake.conversation_url)) &&
+      (value.wake.conversation_id === undefined || value.wake.conversation_id === null || /^[0-9a-f-]{36}$/i.test(String(value.wake.conversation_id))) &&
+      (value.wake.host_session_id === undefined || value.wake.host_session_id === null || String(value.wake.host_session_id).length <= 512)
+    )) &&
     (value.deadline === undefined ||
       value.deadline === null ||
       (typeof value.deadline === "number" &&
@@ -358,7 +377,27 @@ export class StateStore {
         (!revisionSensitive || wake.revision === (job.revision ?? 0))
       )) continue;
       if (transport === "events" || job.stopped) continue;
-      wakes.push(wakeSchema.parse({ id: `wake_${randomUUID()}`, task_id: job.job_id, turn_id: job.turn_id, revision: job.revision ?? 0, reason, status: job.status, conversation_url: job.wake?.conversation_url ?? null, binding_marker: job.wake?.binding_marker ?? "", transport: "browser", state: "pending", stage: "queued", attempts: 0, operation_id: null, retry_at: Date.now(), deadline: Date.now() + 24 * 60 * 60 * 1000, created_at: new Date().toISOString(), actions: [], tab_creations: 0 }));
+      wakes.push(wakeSchema.parse({
+        id: `wake_${randomUUID()}`,
+        task_id: job.job_id,
+        turn_id: job.turn_id,
+        revision: job.revision ?? 0,
+        reason,
+        status: job.status,
+        conversation_url: job.wake?.conversation_url ?? null,
+        binding_source: job.wake?.binding_source ?? (job.wake?.conversation_url ? "recovered" : job.wake?.host_session_id ? "session" : "marker"),
+        binding_marker: job.wake?.binding_marker ?? "",
+        transport: "browser",
+        state: "pending",
+        stage: "queued",
+        attempts: 0,
+        operation_id: null,
+        retry_at: Date.now(),
+        deadline: Date.now() + 24 * 60 * 60 * 1000,
+        created_at: new Date().toISOString(),
+        actions: [],
+        tab_creations: 0,
+      }));
     }
     for (const wake of wakes) {
       const job = jobs.find(j => j.job_id === wake.task_id);

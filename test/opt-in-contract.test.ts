@@ -6,6 +6,7 @@ import {
   CREATE_OPT_IN_RULE,
   EXPLICIT_USER_OPT_IN_PREFIX,
   SERVER_OPT_IN_INSTRUCTIONS,
+  hostSessionId,
   optInDescription,
 } from "../src/mcp.js";
 
@@ -60,4 +61,10 @@ test("every registered Codex MCP tool is wired through the opt-in description he
     const block = source.slice(start, next === -1 ? undefined : next);
     assert.match(block, /description:\s*optInDescription\(/, `${name} bypasses opt-in description`);
   }
+});
+
+test("ChatGPT host session metadata is captured only from the documented openai/session key", () => {
+  assert.equal(hostSessionId({ mcpReq: { _meta: { "openai/session": "session-123", other: "ignored" } } }), "session-123");
+  assert.equal(hostSessionId({ mcpReq: { _meta: { other: "nope" } } }), undefined);
+  assert.equal(hostSessionId({ mcpReq: { _meta: { "openai/session": 123 } } }), undefined);
 });

@@ -170,3 +170,21 @@ The first `browser_open_tab` returned LBB `AMBIGUOUS_OUTCOME`; the sentinel corr
 ChatGPT then started a fresh run from that delivered browser message and rendered exactly `WAKEOK` as instructed. This establishes the local sleep/wake mechanism independently of a long-lived Sol response: a deterministic local process can post a new message into a completed ChatGPT conversation and trigger a new model run. No Codex model turn or API inference was consumed by this acceptance.
 
 The remaining acceptance is specifically Codex-backed orchestration: an explicitly user-authorized Codex task should end the initiating ChatGPT response, complete later, generate the durable wake from real task state, and let the newly triggered ChatGPT run read `codex_task_get` and continue the same authorized task. Because the bridge is USER-OPT-IN ONLY, that final test must not be started without a fresh explicit user instruction to use Codex for the acceptance test.
+
+## Direct conversation binding after Codex-backed marker failure, 2026-10-03
+
+The first real Codex-backed sleep/wake acceptance exposed a primary-binding flaw. Task `20f8d278-5bec-48a5-8e08-e767fe54482a` completed its first real Codex turn and atomically created the browser wake, but the wake remained `pending/queued` with `conversation_url: null` and detail `Marker not indexed yet` across retries. No append or send occurred. This correctly failed closed, but demonstrated that ChatGPT Global Search indexing is not reliable enough to be the autonomous wake's primary conversation locator.
+
+The binding contract was changed accordingly. `codex_task_create` and `codex_task_attach` now accept an optional canonical CURRENT ChatGPT `conversation_url` or equivalent `conversation_id` and persist the normalized URL/ID before any Codex turn. MCP callback context also captures OpenAI's anonymized `openai/session` value when present; it is persisted only as same-conversation continuity evidence and is not treated as a navigable URL. A later submit from a different nonempty host-session identifier fails closed.
+
+Browser wake intents now persist `binding_source`. A `direct` binding opens the exact canonical URL and requires sentinel-owned tab provenance, exact URL readback, idle ChatGPT state, empty-composer proof, verified append and rendered-user-message acceptance, but no longer depends on the binding marker being indexed or rendered. Marker search remains available only when no direct URL exists, and any URL recovered from it remains marker-verified before becoming `binding_source: recovered`. Legacy persisted wakes remain readable and default conservatively to recovered/marker semantics.
+
+The MCP response exposes `wake_binding` and submitted wake evidence with `conversation_url`, `conversation_id`, `binding_source` and a boolean `session_bound` without exposing the raw host session identifier. Server instructions explicitly prohibit ending the ChatGPT response in expectation of autonomous browser wake unless the returned binding is `direct` with a non-null canonical URL; otherwise `codex_task_wait` is the reliable fallback.
+
+Validation after this change:
+- TypeScript typecheck: passed.
+- Build: passed.
+- Direct-binding tests prove persistence before the first Codex turn, URL/ID consistency, host-session mismatch rejection and restart-safe wake state.
+- Browser-wake tests prove that a direct URL delivers without any marker proof, while recovered URLs still require marker proof and marker search remains fail-closed.
+- Complete wrapper suite: **155 tests: 154 passed, zero failed, one optional real-App-Server handshake skipped**.
+- No Codex model turn was used to implement this correction.

@@ -53,6 +53,45 @@ export type AuthorizationAudit = {
   source: "client-attested-explicit-user-opt-in";
 };
 
+export type WakeBindingSource = "direct" | "session" | "recovered" | "marker";
+export type WakeBindingInput = {
+  conversation_url?: string;
+  conversation_id?: string;
+  host_session_id?: string;
+};
+
+type WakeBinding = {
+  conversation_url: string | null;
+  conversation_id: string | null;
+  host_session_id: string | null;
+  binding_source: WakeBindingSource;
+};
+
+const conversationIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function normalizeWakeBinding(input: WakeBindingInput = {}): WakeBinding {
+  const id = input.conversation_id?.trim().toLowerCase();
+  if (id && !conversationIdPattern.test(id))
+    throw new Error("conversation_id must be a canonical ChatGPT conversation UUID");
+  const url = input.conversation_url?.trim().toLowerCase();
+  if (url && !conversationUrl.test(url))
+    throw new Error("conversation_url must be canonical https://chatgpt.com/c/UUID");
+  const urlId = url?.slice("https://chatgpt.com/c/".length) ?? null;
+  if (id && urlId && id !== urlId)
+    throw new Error("conversation_id and conversation_url refer to different conversations");
+  const host = input.host_session_id?.trim() || null;
+  if (host && host.length > 512)
+    throw new Error("Host conversation session identifier is too long");
+  const conversation_id = id ?? urlId;
+  const conversation_url = url ?? (conversation_id ? `https://chatgpt.com/c/${conversation_id}` : null);
+  return {
+    conversation_url,
+    conversation_id,
+    host_session_id: host,
+    binding_source: conversation_url ? "direct" : host ? "session" : "marker",
+  };
+}
+
 function authorizationAudit(basis?: string): AuthorizationAudit {
   const trimmed = basis?.trim();
   if (trimmed && trimmed.length > 500) throw new Error("authorization_basis exceeds 500 characters");
@@ -91,7 +130,14 @@ type JobRecord = {
   threadId: string | null;
   workspace: string;
   authorization: AuthorizationAudit | null;
-  wake?: { enabled: boolean; conversation_url: string | null; binding_marker: string };
+  wake?: {
+    enabled: boolean;
+    conversation_url: string | null;
+    conversation_id: string | null;
+    host_session_id: string | null;
+    binding_source: WakeBindingSource;
+    binding_marker: string;
+  };
   turnId: string | null;
   status: JobStatus;
   finalMessage: string | null;
@@ -175,6 +221,13 @@ export type JobSnapshot = {
   turn_count?: number;
   historical_turn_count?: number;
   authorization?: AuthorizationAudit | null;
+  wake_binding?: {
+    conversation_url: string | null;
+    conversation_id: string | null;
+    binding_source: WakeBindingSource;
+    session_bound: boolean;
+    binding_marker: string;
+  };
   recovery_required?: boolean;
   stopped?: boolean;
   status: JobStatus;
@@ -210,7 +263,7 @@ export type JobSnapshot = {
 
 export type JobStartResult = Pick<
   JobSnapshot,
-  "job_id" | "thread_id" | "turn_id" | "status" | "revision"
+  "job_id" | "thread_id" | "turn_id" | "status" | "revision" | "wake_binding"
 >;
 
 export type JobGetOptions = {
@@ -782,7 +835,11 @@ export class JobManager {
   pinBrowserConversation(task: string, url: string): void {
     const job = this.getJob(task);
     if (!job.wake?.enabled) throw new Error("Browser wake disarmed");
-    job.wake.conversation_url = url; this.persist(job, true);
+    const normalized = normalizeWakeBinding({ conversation_url: url });
+    job.wake.conversation_url = normalized.conversation_url;
+    job.wake.conversation_id = normalized.conversation_id;
+    job.wake.binding_source = "recovered";
+    this.persist(job, true);
   }
   bindWakeService(status: () => object): void { this.wakeServiceStatus = status; }
   isWakePaused(): boolean { return this.wakePaused; }
@@ -841,8 +898,14 @@ export class JobManager {
     return { models: await this.catalog.list() };
   }
 
-  async create(workspace: string, selection: Selection = {}, authorizationBasis?: string): Promise<JobStartResult> {
+  async create(
+    workspace: string,
+    selection: Selection = {},
+    authorizationBasis?: string,
+    wakeBinding: WakeBindingInput = {},
+  ): Promise<JobStartResult> {
     const canonicalWorkspace = await validateWorkspace(workspace, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath);
+    const directBinding = normalizeWakeBinding(wakeBinding);
     const stateRelative = path.relative(
       canonicalWorkspace,
       this.store.filePath,
@@ -869,6 +932,11 @@ export class JobManager {
         threadId: null,
         workspace: canonicalWorkspace,
         authorization: authorizationAudit(authorizationBasis),
+        wake: {
+          enabled: false,
+          ...directBinding,
+          binding_marker: `CW-BIND-${randomUUID()}`,
+        },
         turnId: null,
         status: "starting",
         finalMessage: null,
@@ -1000,17 +1068,33 @@ export class JobManager {
     return { thread, turns: page.data.filter(isObject) };
   }
 
-  async attach(threadId: string, authorizationBasis?: string): Promise<JobStartResult & { historical_turn_count: number }> {
+  async attach(
+    threadId: string,
+    authorizationBasis?: string,
+    wakeBinding: WakeBindingInput = {},
+  ): Promise<JobStartResult & { historical_turn_count: number }> {
     return this.withExclusive(async () => {
       await this.ensureReady();
       this.assertNoActiveTurn();
       const existingId = this.jobsByThread.get(threadId);
       if (existingId) {
         const existing = this.getJob(existingId);
-        if (authorizationBasis?.trim()) {
-          existing.authorization = authorizationAudit(authorizationBasis);
-          this.persist(existing, true);
+        const binding = normalizeWakeBinding(wakeBinding);
+        if (binding.host_session_id && existing.wake?.host_session_id && binding.host_session_id !== existing.wake.host_session_id)
+          throw new Error("This Codex task is bound to a different ChatGPT conversation session");
+        if (binding.conversation_url && existing.wake?.conversation_url && binding.conversation_url !== existing.wake.conversation_url)
+          throw new Error("Task is already bound to a different canonical conversation");
+        if (authorizationBasis?.trim()) existing.authorization = authorizationAudit(authorizationBasis);
+        if (!existing.wake) {
+          existing.wake = { enabled: false, ...binding, binding_marker: `CW-BIND-${randomUUID()}` };
+        } else if (binding.conversation_url || binding.host_session_id) {
+          existing.wake.conversation_url = binding.conversation_url ?? existing.wake.conversation_url;
+          existing.wake.conversation_id = binding.conversation_id ?? existing.wake.conversation_id;
+          existing.wake.host_session_id = binding.host_session_id ?? existing.wake.host_session_id;
+          if (binding.conversation_url) existing.wake.binding_source = "direct";
+          else if (!existing.wake.conversation_url && binding.host_session_id) existing.wake.binding_source = "session";
         }
+        this.persist(existing, true);
         return { ...this.startResult(existing), historical_turn_count: existing.historicalTurnCount };
       }
       await requireChatGPT(this.appServer);
@@ -1023,6 +1107,11 @@ export class JobManager {
         settings: null, historicalTurnCount: turns.length, modelEvidence: [], turnCount: 0, requests: {}, stopped: false,
         deadline: null, commandEvidence: [], jobId: randomUUID(), threadId, workspace,
         authorization: authorizationAudit(authorizationBasis),
+        wake: {
+          enabled: false,
+          ...normalizeWakeBinding(wakeBinding),
+          binding_marker: `CW-BIND-${randomUUID()}`,
+        },
         turnId: latest && typeof latest.id === "string" ? latest.id : null, status: "ready",
         finalMessage: null, latestDiff: null, filesChanged: [], commandsExecuted: [], error: null,
         pendingApprovals: new Map(), lastAgentMessage: null, agentMessages: new Map(), revision: 0,
@@ -1064,20 +1153,53 @@ export class JobManager {
     requestId: string,
     expectedRevision?: number,
     selection: Selection = {},
-    wakeOptions: { wake?: "browser" | "none"; conversation_url?: string } = {},
-  ): Promise<JobStartResult & { wake?: { state: string; binding_marker: string; transport: string; conversation_url: string | null } }> {
+    wakeOptions: {
+      wake?: "browser" | "none";
+      conversation_url?: string;
+      conversation_id?: string;
+      host_session_id?: string;
+    } = {},
+  ): Promise<JobStartResult & { wake?: {
+    state: string;
+    binding_marker: string;
+    transport: string;
+    conversation_url: string | null;
+    conversation_id: string | null;
+    binding_source: WakeBindingSource;
+    session_bound: boolean;
+  } }> {
     this.validatePrompt(prompt);
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId))
       throw new Error("Invalid request_id");
     return this.withExclusive(async () => {
       const job = this.getJob(jobId);
-      const canonicalUrl = wakeOptions.conversation_url;
-      if (canonicalUrl && job.wake?.conversation_url && canonicalUrl !== job.wake.conversation_url) throw new Error("Task is already bound to a different canonical conversation");
-      if (canonicalUrl && !conversationUrl.test(canonicalUrl)) throw new Error("conversation_url must be canonical https://chatgpt.com/c/UUID");
-      const browserWake = wakeOptions.wake === "browser" || (!wakeOptions.wake && this.getJob(jobId).wake?.enabled === true);
+      const incomingBinding = normalizeWakeBinding({
+        conversation_url: wakeOptions.conversation_url,
+        conversation_id: wakeOptions.conversation_id,
+        host_session_id: wakeOptions.host_session_id,
+      });
+      if (
+        incomingBinding.host_session_id &&
+        job.wake?.host_session_id &&
+        incomingBinding.host_session_id !== job.wake.host_session_id
+      )
+        throw new Error("This Codex task is bound to a different ChatGPT conversation session");
+      if (
+        incomingBinding.conversation_url &&
+        job.wake?.conversation_url &&
+        incomingBinding.conversation_url !== job.wake.conversation_url
+      )
+        throw new Error("Task is already bound to a different canonical conversation");
+      const canonicalUrl = incomingBinding.conversation_url ?? job.wake?.conversation_url ?? null;
+      const canonicalId = incomingBinding.conversation_id ?? job.wake?.conversation_id ?? (canonicalUrl ? canonicalUrl.slice("https://chatgpt.com/c/".length) : null);
+      const hostSessionId = incomingBinding.host_session_id ?? job.wake?.host_session_id ?? null;
+      const bindingSource: WakeBindingSource = incomingBinding.conversation_url
+        ? "direct"
+        : job.wake?.binding_source ?? incomingBinding.binding_source;
+      const browserWake = wakeOptions.wake === "browser" || (!wakeOptions.wake && job.wake?.enabled === true);
       const eventsWake = this.store.hasActiveSubscription(jobId);
       const effectiveWake = eventsWake ? "events" : wakeOptions.wake ?? (browserWake ? "browser" : undefined);
-      const hash = createHash("sha256").update(JSON.stringify(["submit-v3", prompt, selection.model ?? null, selection.reasoning_effort ?? null, wakeOptions.wake ?? null, canonicalUrl ?? null])).digest("hex");
+      const hash = createHash("sha256").update(JSON.stringify(["submit-v3", prompt, selection.model ?? null, selection.reasoning_effort ?? null, wakeOptions.wake ?? null, canonicalUrl])).digest("hex");
       const prior = Object.hasOwn(job.requests, requestId)
         ? job.requests[requestId]
         : undefined;
@@ -1159,10 +1281,34 @@ export class JobManager {
       if (typeof currentThread.cwd === "string" && await validateWorkspace(currentThread.cwd, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath) !== job.workspace) throw new Error("Thread workspace changed externally");
       const resolved = await this.catalog.resolve(selection, job.settings, job.workspace);
       if (job.settings?.model_provider && job.settings.model_provider !== "openai") throw new Error("Only ChatGPT-authenticated OpenAI Codex is permitted");
-      if (wakeOptions.wake === "none") job.wake = { enabled: false, conversation_url: job.wake?.conversation_url ?? null, binding_marker: job.wake?.binding_marker ?? `CW-BIND-${randomUUID()}` };
-      else if (browserWake) {
+      const bindingMarker = job.wake?.binding_marker ?? `CW-BIND-${randomUUID()}`;
+      if (wakeOptions.wake === "none") {
+        job.wake = {
+          enabled: false,
+          conversation_url: canonicalUrl,
+          conversation_id: canonicalId,
+          host_session_id: hostSessionId,
+          binding_source: bindingSource,
+          binding_marker: bindingMarker,
+        };
+      } else if (browserWake) {
         if (!this.browserWakeEnabled) throw new Error("Browser wake is not enabled by local operator configuration");
-        job.wake = { enabled: true, conversation_url: canonicalUrl ?? job.wake?.conversation_url ?? null, binding_marker: job.wake?.binding_marker ?? `CW-BIND-${randomUUID()}` };
+        job.wake = {
+          enabled: true,
+          conversation_url: canonicalUrl,
+          conversation_id: canonicalId,
+          host_session_id: hostSessionId,
+          binding_source: bindingSource,
+          binding_marker: bindingMarker,
+        };
+      } else if (job.wake && (incomingBinding.host_session_id || incomingBinding.conversation_url)) {
+        job.wake = {
+          ...job.wake,
+          conversation_url: canonicalUrl,
+          conversation_id: canonicalId,
+          host_session_id: hostSessionId,
+          binding_source: bindingSource,
+        };
       }
       Object.defineProperty(job.requests, requestId, {
         value: { hash, hash_version: 3, turn_id: null, previous_turn_id: job.turnId, wake: effectiveWake },
@@ -1612,7 +1758,26 @@ export class JobManager {
       threadId: value.thread_id,
       workspace: value.workspace,
       authorization: value.authorization ?? null,
-      wake: value.wake,
+      wake: value.wake
+        ? {
+            enabled: value.wake.enabled,
+            conversation_url: value.wake.conversation_url,
+            conversation_id:
+              value.wake.conversation_id ??
+              (value.wake.conversation_url
+                ? value.wake.conversation_url.slice("https://chatgpt.com/c/".length)
+                : null),
+            host_session_id: value.wake.host_session_id ?? null,
+            binding_source:
+              value.wake.binding_source ??
+              (value.wake.conversation_url
+                ? "recovered"
+                : value.wake.host_session_id
+                  ? "session"
+                  : "marker"),
+            binding_marker: value.wake.binding_marker,
+          }
+        : undefined,
       turnId: value.turn_id,
       status,
       finalMessage: value.final_message,
@@ -2292,8 +2457,15 @@ export class JobManager {
 
   private wakeView(job: JobRecord, transport: string) {
     const intent = this.store.wakeIntents().reverse().find(w => w.task_id === job.jobId && w.turn_id === job.turnId);
-    return { state: transport === "events" ? "selected" : transport === "browser" ? intent?.state ?? "armed" : "disabled",
-      binding_marker: job.wake!.binding_marker, transport, conversation_url: job.wake!.conversation_url };
+    return {
+      state: transport === "events" ? "selected" : transport === "browser" ? intent?.state ?? "armed" : "disabled",
+      binding_marker: job.wake!.binding_marker,
+      transport,
+      conversation_url: job.wake!.conversation_url,
+      conversation_id: job.wake!.conversation_id,
+      binding_source: job.wake!.binding_source,
+      session_bound: job.wake!.host_session_id !== null,
+    };
   }
 
   wakeStatus(): object {
@@ -2322,6 +2494,17 @@ export class JobManager {
       turn_id: job.turnId ?? undefined,
       status: job.status,
       revision: job.revision,
+      ...(job.wake ? { wake_binding: this.bindingView(job) } : {}),
+    };
+  }
+
+  private bindingView(job: JobRecord) {
+    return {
+      conversation_url: job.wake?.conversation_url ?? null,
+      conversation_id: job.wake?.conversation_id ?? null,
+      binding_source: job.wake?.binding_source ?? "marker" as WakeBindingSource,
+      session_bound: job.wake?.host_session_id !== null && job.wake?.host_session_id !== undefined,
+      binding_marker: job.wake?.binding_marker ?? "",
     };
   }
   private validatePrompt(prompt: string): void {
@@ -2386,6 +2569,7 @@ export class JobManager {
       turn_count: job.turnCount,
       historical_turn_count: job.historicalTurnCount,
       authorization: job.authorization,
+      ...(job.wake ? { wake_binding: this.bindingView(job) } : {}),
       recovery_required: job.status === "recovery_required",
       stopped: job.stopped,
     };

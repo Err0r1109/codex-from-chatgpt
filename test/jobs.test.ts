@@ -179,6 +179,58 @@ test("create persists a client-attested explicit user authorization audit for th
   assert.equal(after.turn_count, 1);
 });
 
+test("create persists direct conversation binding before any Codex turn and enforces host-session continuity", async () => {
+  const { fake, manager, store } = managerFixture(true);
+  const url = "https://chatgpt.com/c/123e4567-e89b-42d3-a456-426614174000";
+  const id = "123e4567-e89b-42d3-a456-426614174000";
+  const task = await manager.create(workspace, {}, "Use Codex.", {
+    conversation_url: url,
+    conversation_id: id,
+    host_session_id: "chat-session-a",
+  });
+  const persisted = store.load()[0]!;
+  assert.equal(persisted.wake?.enabled, false);
+  assert.equal(persisted.wake?.conversation_url, url);
+  assert.equal(persisted.wake?.conversation_id, id);
+  assert.equal(persisted.wake?.host_session_id, "chat-session-a");
+  assert.equal(persisted.wake?.binding_source, "direct");
+  assert.equal(task.status, "ready");
+
+  await assert.rejects(
+    manager.submit(task.job_id!, "work", "wrong-session", task.revision, {}, {
+      wake: "browser",
+      host_session_id: "chat-session-b",
+    }),
+    /different ChatGPT conversation session/,
+  );
+  assert.equal(manager.get(task.job_id!, {}).turn_count, 0);
+
+  const accepted = await manager.submit(task.job_id!, "work", "right-session", task.revision, {}, {
+    wake: "browser",
+    host_session_id: "chat-session-a",
+  });
+  assert.equal(accepted.wake?.conversation_url, url);
+  assert.equal(accepted.wake?.conversation_id, id);
+  assert.equal(accepted.wake?.binding_source, "direct");
+  assert.equal(accepted.wake?.session_bound, true);
+  completed(fake);
+  assert.equal(store.wakeIntents()[0]!.binding_source, "direct");
+  assert.equal(store.wakeIntents()[0]!.conversation_url, url);
+});
+
+test("create rejects mismatched direct conversation URL and ID before creating a Codex thread", async () => {
+  const { fake, manager } = managerFixture(true);
+  await assert.rejects(
+    manager.create(workspace, {}, "Use Codex.", {
+      conversation_url: "https://chatgpt.com/c/123e4567-e89b-42d3-a456-426614174000",
+      conversation_id: "223e4567-e89b-42d3-a456-426614174000",
+      host_session_id: "chat-session-a",
+    }),
+    /different conversations/,
+  );
+  assert.equal(fake.requests.some(r => r.method === "thread/start"), false);
+});
+
 test("wait times out without polling or mutating revision", async () => {
   const { manager } = managerFixture();
   const ready = await manager.create(workspace);

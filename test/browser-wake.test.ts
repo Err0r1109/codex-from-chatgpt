@@ -95,13 +95,17 @@ function fixture(explicitUrl = true) {
   const job: PersistedJob = { job_id: task, thread_id: "thread", turn_id: "turn", workspace: process.cwd(),
     status: "running", final_message: null, latest_diff: null, files_changed: [], commands_executed: [], error: null,
     updated_at: new Date().toISOString(), revision: 1,
-    wake: { enabled: true, binding_marker: binding, conversation_url: explicitUrl ? url : null },
+    wake: {
+      enabled: true,
+      binding_marker: binding,
+      conversation_url: explicitUrl ? url : null,
+      conversation_id: explicitUrl ? url.slice("https://chatgpt.com/c/".length) : null,
+      host_session_id: "session-fixture",
+      binding_source: explicitUrl ? "direct" : "session",
+    },
     requests: { request: { hash: "hash", hash_version: 3, turn_id: "turn", wake: "browser" } } };
   store.save([job]); job.status = "completed"; job.revision = 2; store.save([job]);
   const lbb = new FakeLbb();
-  // An explicit URL is still untrusted routing data; model the started reply
-  // containing the unpredictable binding marker that proves the conversation.
-  if (explicitUrl) lbb.searchMarker = binding;
   let paused = false, now = Date.now();
   const make = (s = store) => new BrowserWakeService(s, lbb, { paused: () => paused, now: () => now,
     authorize: async id => { assert.equal(id, task); }, pin: (id, pinned) => { assert.equal(id, task); job.wake!.conversation_url = pinned; s.save([job]); } });
@@ -302,12 +306,23 @@ test("already dispatched wake is reconciled after task progresses, not resent or
   assert.equal(f.store.wakeIntents()[0]!.state,"uncertain");f.lbb.reveal=true;f.advance();await f.make().tick();assert.equal(f.store.wakeIntents()[0]!.state,"delivered");assert.equal(f.lbb.sent.length,1);
 });
 
-test("caller-supplied canonical URL without the binding marker never writes to that conversation", async () => {
+test("direct create-time canonical URL does not depend on marker indexing", async () => {
   const f = fixture(true);
   f.lbb.bindingMissing = true;
   await f.make().tick();
+  assert.equal(f.store.wakeIntents()[0]!.binding_source, "direct");
+  assert.equal(f.store.wakeIntents()[0]!.state, "delivered");
+  assert.equal(f.lbb.sent.length, 1);
+  assert.equal(f.lbb.calls.some(c => c.name === "browser_click" && c.args.ref === "search"), false);
+});
+
+test("recovered canonical URL still requires marker proof before writing", async () => {
+  const f = fixture(true);
+  const wakes = f.store.wakeIntents();
+  f.store.updateWake(wakes[0]!.id, w => { w.binding_source = "recovered"; });
+  f.lbb.bindingMissing = true;
+  await f.make().tick();
   assert.equal(f.lbb.sent.length, 0);
-  assert.equal(f.lbb.calls.filter(c => c.name === "browser_type" || c.name === "browser_press").length, 0);
   assert.equal(f.store.wakeIntents()[0]!.state, "pending");
 });
 

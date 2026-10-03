@@ -58,7 +58,17 @@ export class BrowserWakeService {
     const counts: Record<string, number> = {};
     for (const w of this.store.wakeIntents()) counts[w.state] = (counts[w.state] ?? 0) + 1;
     return { service: this.stopped ? "stopped" : this.options.paused() ? "paused" : "running", counts,
-      outbox: this.store.wakeIntents().slice(-20).map(w => ({ id: w.id, task_id: w.task_id, state: w.state, stage: w.stage, detail: w.detail, retry_at: w.retry_at, deadline: w.deadline })) };
+      outbox: this.store.wakeIntents().slice(-20).map(w => ({
+        id: w.id,
+        task_id: w.task_id,
+        state: w.state,
+        stage: w.stage,
+        binding_source: w.binding_source,
+        conversation_url: w.conversation_url,
+        detail: w.detail,
+        retry_at: w.retry_at,
+        deadline: w.deadline,
+      })) };
   }
   start(): void {
     if (this.timer || this.stopped) return;
@@ -265,7 +275,10 @@ export class BrowserWakeService {
       throw new Deferred("Browser session changed; re-open and re-verify the pinned conversation", "pending");
     }
     this.options.pin(w.task_id, url);
-    this.store.updateWake(w.id, x => { x.conversation_url = url; });
+    this.store.updateWake(w.id, x => {
+      x.conversation_url = url;
+      x.binding_source = "recovered";
+    });
     return this.current(w.id);
   }
   private async resolve(w: WakeIntent): Promise<WakeIntent> {
@@ -337,12 +350,19 @@ export class BrowserWakeService {
       w = this.current(w.id);
     }
     w = await this.ownedTab(w);
-    // A caller-supplied canonical URL is only a routing hint. Before any write,
-    // prove the unpredictable binding marker is actually rendered in that conversation.
     if (w.conversation_url && w.stage !== "dispatched") {
-      w = await this.pinVerified(w, w.conversation_url);
-      // Read first: a busy conversation must not repeatedly steal foreground focus.
-      this.idle(await this.observe(w));
+      if (w.binding_source === "direct") {
+        // Direct create-time binding is authoritative routing data. Safety still
+        // requires exact canonical URL readback, owned-tab provenance, idle state,
+        // and an empty verified composer before any write. It does not depend on
+        // ChatGPT search indexing or on the marker being rendered.
+        this.idle(await this.observe(w));
+      } else {
+        // Recovered/legacy bindings remain hints until the unpredictable marker is
+        // observed inside that exact conversation.
+        w = await this.pinVerified(w, w.conversation_url);
+        this.idle(await this.observe(w));
+      }
     }
     // Activates only the sentinel-owned tab; necessary for native actions, never adopts a user tab.
     if (w.stage !== "dispatched") await this.action(w, "activate", "browser_switch_tab", { tabId: w.tab!.id, focusWindow: true });

@@ -15,6 +15,18 @@ export const SERVER_OPT_IN_INSTRUCTIONS =
 export const optInDescription = (detail: string, create = false) =>
   `${EXPLICIT_USER_OPT_IN_PREFIX}${create ? ` ${CREATE_OPT_IN_RULE}` : ""} ${detail}`;
 
+export function hostSessionId(ctx: { mcpReq?: { _meta?: unknown } }): string | undefined {
+  const meta = ctx.mcpReq?._meta;
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return undefined;
+  const value = (meta as Record<string, unknown>)["openai/session"];
+  return typeof value === "string" && value.trim().length > 0 && value.length <= 512
+    ? value.trim()
+    : undefined;
+}
+
+const conversationIdSchema = z.string().regex(/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/);
+const conversationUrlSchema = z.string().regex(/^https:\/\/chatgpt\.com\/c\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/);
+
 function result(value: object) {
   const data = { ...value } as Record<string, unknown>;
   if (typeof data.job_id === "string") {
@@ -48,7 +60,7 @@ export function createMcpServer(
       capabilities,
       supportedProtocolVersions: ["2026-07-28"],
       instructions:
-        `${SERVER_OPT_IN_INSTRUCTIONS} Prefer MCP Events after opt-in: create a task, subscribe to codex.task_changed, then submit. If this ChatGPT host cannot subscribe to Events, browser wake is an authorized UI fallback when available; otherwise keep the same response active and use codex_task_wait. For browser wake, print the returned CW-BIND marker in your short started reply and end that response; on wake read codex_task_get and review before any next turn. Never require the user to relay Codex output. Codex approvals require the local operator.`,
+        `${SERVER_OPT_IN_INSTRUCTIONS} Prefer MCP Events after opt-in when the host exposes subscription. For browser wake, bind the task directly at create/attach time by supplying the CURRENT canonical ChatGPT conversation_url or conversation_id when the host actually knows it; never guess. The bridge also records OpenAI's anonymized openai/session metadata for same-conversation continuity, but that value is not a navigable ChatGPT URL. Only end the ChatGPT response expecting autonomous browser wake when wake_binding/wake reports binding_source="direct" with a non-null conversation_url. Marker search is recovery-only and must not be treated as a reliable primary binding. If direct binding is unavailable, keep the same response active and use codex_task_wait with the last observed revision until Codex completes or needs attention. Then read codex_task_get before any next turn. Never require the user to relay Codex output. Codex approvals require the local operator.`,
     },
   );
   const task_id = z.string().uuid();
@@ -71,20 +83,32 @@ export function createMcpServer(
     inputSchema: z.object({
       thread_id: z.string().min(1).max(200),
       authorization_basis: z.string().min(1).max(500).describe("Optional brief excerpt or paraphrase of the user's explicit Codex instruction. Audit/debug only; client-attested, not trusted verification.").optional(),
+      conversation_url: conversationUrlSchema.describe("Optional canonical URL of the CURRENT ChatGPT conversation. Primary persistent browser-wake binding. Supply only when known; never guess.").optional(),
+      conversation_id: conversationIdSchema.describe("Optional UUID of the CURRENT ChatGPT conversation. Equivalent to conversation_url. Supply only when known; never guess.").optional(),
     }).strict(),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  }, (p) => call(() => manager.attach(p.thread_id, p.authorization_basis)));
+  }, (p, ctx) => call(() => manager.attach(
+    p.thread_id,
+    p.authorization_basis,
+    {
+      conversation_url: p.conversation_url,
+      conversation_id: p.conversation_id,
+      host_session_id: hostSessionId(ctx),
+    },
+  )));
   server.registerTool(
     "codex_task_create",
     {
       description: optInDescription(
-        "Create a durable task and Codex thread in an operator-authorized workspace. Does not execute a turn; subscribe before submitting.",
+        "Create a durable task and Codex thread in an operator-authorized workspace. Does not execute a turn. Persist the CURRENT ChatGPT conversation URL/ID here when it is actually available so browser wake has a direct primary target before Codex starts; never invent it. The server also records the host's anonymized openai/session correlation automatically.",
         true,
       ),
       inputSchema: z
         .object({
           workspace: z.string().min(1).max(4096),
           authorization_basis: z.string().min(1).max(500).describe("Optional brief excerpt or paraphrase of the user's explicit Codex instruction. Audit/debug only; client-attested, not trusted verification.").optional(),
+          conversation_url: conversationUrlSchema.describe("Optional canonical URL of the CURRENT ChatGPT conversation. Primary persistent browser-wake binding. Supply only when known; never guess.").optional(),
+          conversation_id: conversationIdSchema.describe("Optional UUID of the CURRENT ChatGPT conversation. Equivalent to conversation_url and persisted as the primary browser-wake binding. Supply only when known; never guess.").optional(),
           ...selection,
         })
         .strict(),
@@ -95,12 +119,21 @@ export function createMcpServer(
         openWorldHint: false,
       },
     },
-    ({ workspace, authorization_basis, ...selected }) => call(() => manager.create(workspace, selected, authorization_basis)),
+    ({ workspace, authorization_basis, conversation_url, conversation_id, ...selected }, ctx) => call(() => manager.create(
+      workspace,
+      selected,
+      authorization_basis,
+      {
+        conversation_url,
+        conversation_id,
+        host_session_id: hostSessionId(ctx),
+      },
+    )),
   );
   server.registerTool(
     "codex_turn_submit",
     {
-      description: optInDescription("Submit programming work to an existing user-authorized Codex task. Once the user explicitly opted in for this SAME task, no additional opt-in is required for follow-up turns, testing or corrections needed to complete it. Returns after acceptance. Same request_id and prompt never start another turn; a stopped or uncertain task cannot continue."),
+      description: optInDescription("Submit programming work to an existing user-authorized Codex task. Once the user explicitly opted in for this SAME task, no additional opt-in is required for follow-up turns, testing or corrections needed to complete it. Browser wake should normally inherit the direct conversation binding persisted at task creation. Only treat browser wake as autonomous when the returned wake reports binding_source='direct' and a non-null conversation_url; marker search is recovery-only. Returns after acceptance. Same request_id and prompt never start another turn; a stopped or uncertain task cannot continue."),
       inputSchema: z
         .object({
           task_id,
@@ -109,7 +142,8 @@ export function createMcpServer(
           expected_revision: z.number().int().nonnegative(),
           ...selection,
           wake: z.enum(["browser", "none"]).optional(),
-          conversation_url: z.string().max(128).optional(),
+          conversation_url: conversationUrlSchema.describe("Canonical URL for the SAME current ChatGPT conversation. Normally inherited from task creation; use only if the create-time host could not provide it.").optional(),
+          conversation_id: conversationIdSchema.describe("Conversation UUID equivalent to conversation_url. Normally inherited from task creation.").optional(),
         })
         .strict(),
       annotations: {
@@ -119,9 +153,21 @@ export function createMcpServer(
         openWorldHint: true,
       },
     },
-    (p) =>
+    (p, ctx) =>
       call(() =>
-        manager.submit(p.task_id, p.prompt, p.request_id, p.expected_revision, { model: p.model, reasoning_effort: p.reasoning_effort }, { wake: p.wake, conversation_url: p.conversation_url }),
+        manager.submit(
+          p.task_id,
+          p.prompt,
+          p.request_id,
+          p.expected_revision,
+          { model: p.model, reasoning_effort: p.reasoning_effort },
+          {
+            wake: p.wake,
+            conversation_url: p.conversation_url,
+            conversation_id: p.conversation_id,
+            host_session_id: hostSessionId(ctx),
+          },
+        ),
       ),
   );
   server.registerTool(
