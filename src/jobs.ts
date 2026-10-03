@@ -973,6 +973,33 @@ export class JobManager {
     return { threads, ...(typeof response.nextCursor === "string" ? { next_cursor: response.nextCursor } : {}) };
   }
 
+  private async readThreadState(threadId: string): Promise<{ thread: JsonObject; turns: JsonObject[] }> {
+    const read = await this.appServer.request<unknown>("thread/read", { threadId });
+    const thread = isObject(read) && isObject(read.thread) ? read.thread : null;
+    if (!thread || stringValue(thread.id) !== threadId)
+      throw new Error("thread/read did not confirm the requested thread");
+    const legacyTurns = Array.isArray(thread.turns) ? thread.turns.filter(isObject) : null;
+    let page: unknown;
+    try {
+      page = await this.appServer.request<unknown>("thread/turns/list", {
+        threadId,
+        limit: 1000,
+        sortDirection: "asc",
+        itemsView: "notLoaded",
+      });
+    } catch (error) {
+      if (legacyTurns !== null) return { thread, turns: legacyTurns };
+      throw error;
+    }
+    if (!isObject(page) || !Array.isArray(page.data)) {
+      if (legacyTurns !== null) return { thread, turns: legacyTurns };
+      throw new Error("thread/turns/list did not return data[]");
+    }
+    if (typeof page.nextCursor === "string" && page.nextCursor.length > 0)
+      throw new Error("Thread has more than 1000 turns; bounded inspection refused");
+    return { thread, turns: page.data.filter(isObject) };
+  }
+
   async attach(threadId: string, authorizationBasis?: string): Promise<JobStartResult & { historical_turn_count: number }> {
     return this.withExclusive(async () => {
       await this.ensureReady();
@@ -987,12 +1014,9 @@ export class JobManager {
         return { ...this.startResult(existing), historical_turn_count: existing.historicalTurnCount };
       }
       await requireChatGPT(this.appServer);
-      const read = await this.appServer.request<unknown>("thread/read", { threadId, includeTurns: true });
-      const thread = isObject(read) && isObject(read.thread) ? read.thread : null;
-      if (!thread || thread.id !== threadId) throw new Error("thread/read did not confirm the requested thread");
+      const { thread, turns } = await this.readThreadState(threadId);
       if (typeof thread.cwd !== "string" || !path.isAbsolute(thread.cwd)) throw new Error("Existing thread has missing or invalid cwd");
       const workspace = await validateWorkspace(thread.cwd, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath);
-      const turns = Array.isArray(thread.turns) ? thread.turns.filter(isObject) : [];
       const latest = turns.at(-1);
       if (latest && !isTerminal(latest.status)) throw new Error(`Cannot attach thread with nonterminal or ambiguous latest turn status: ${String(latest.status)}`);
       const job: JobRecord = {
@@ -1130,10 +1154,8 @@ export class JobManager {
         this.loadedThreads.add(job.threadId);
         this.recordSettings(job, resumed, "thread/resume");
       }
-      const read = await this.appServer.request<unknown>("thread/read", { threadId: job.threadId, includeTurns: true });
-      const currentThread = isObject(read) && isObject(read.thread) ? read.thread : null;
-      if (!currentThread || currentThread.id !== job.threadId || !Array.isArray(currentThread.turns)) throw new Error("Thread identity or active-turn evidence unavailable");
-      if (currentThread.turns.some(t => !isObject(t) || !isTerminal(t.status))) throw new Error("Existing thread has an external active or ambiguous turn; no turn started");
+      const { thread: currentThread, turns: currentTurns } = await this.readThreadState(job.threadId);
+      if (currentTurns.some(t => !isTerminal(t.status))) throw new Error("Existing thread has an external active or ambiguous turn; no turn started");
       if (typeof currentThread.cwd === "string" && await validateWorkspace(currentThread.cwd, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath) !== job.workspace) throw new Error("Thread workspace changed externally");
       const resolved = await this.catalog.resolve(selection, job.settings, job.workspace);
       if (job.settings?.model_provider && job.settings.model_provider !== "openai") throw new Error("Only ChatGPT-authenticated OpenAI Codex is permitted");
@@ -1448,19 +1470,7 @@ export class JobManager {
   ): Promise<void> {
     try {
       job.workspace = await validateWorkspace(job.workspace, this.workspacePolicy === "explicit" ? null : this.workspaceRoots, this.store.filePath);
-      const response = await this.appServer.request<unknown>("thread/read", {
-        threadId: job.threadId,
-        includeTurns: true,
-      });
-      const thread =
-        isObject(response) && isObject(response.thread)
-          ? response.thread
-          : null;
-      if (!thread || stringValue(thread.id) !== job.threadId)
-        throw new Error("thread/read devolvió un thread distinto.");
-      const turns = Array.isArray(thread.turns)
-        ? thread.turns.filter(isObject)
-        : [];
+      const { thread, turns } = await this.readThreadState(job.threadId!);
       const latest = turns.at(-1);
       if (thread.model && typeof thread.model === "string") {
         job.settings = {
@@ -1512,16 +1522,26 @@ export class JobManager {
           isObject(resumed) && isObject(resumed.thread) ? resumed.thread : null;
         if (!resumedThread || stringValue(resumedThread.id) !== job.threadId)
           throw new Error("thread/resume no confirmó el thread.");
-        const resumedTurns = Array.isArray(resumedThread.turns)
+        const resumedLegacyTurns = Array.isArray(resumedThread.turns)
           ? resumedThread.turns.filter(isObject)
           : [];
+        const resumedTurns = resumedLegacyTurns.length > 0
+          ? resumedLegacyTurns
+          : (await this.readThreadState(job.threadId!)).turns;
         const resumedTurn = resumedTurns.find(
           (turn) => stringValue(turn.id) === expectedTurnId,
         );
-        if (!resumedTurn || stringValue(resumedTurn.status) !== "inProgress")
-          throw new Error(
-            "thread/resume no confirmó el mismo turn inProgress.",
-          );
+        const resumedStatus = stringValue(resumedTurn?.status);
+        if (!resumedTurn)
+          throw new Error("thread/resume no confirmó el mismo turn.");
+        if (resumedStatus && isTerminal(resumedStatus)) {
+          this.applyTerminalStatus(job, resumedStatus, resumedTurn);
+          this.touch(job);
+          this.persist(job);
+          return;
+        }
+        if (resumedStatus !== "inProgress")
+          throw new Error("thread/resume no confirmó el mismo turn inProgress.");
         if (isTerminal(job.status) || job.turnId !== expectedTurnId) return;
         job.status = "running";
         job.turnId = expectedTurnId;

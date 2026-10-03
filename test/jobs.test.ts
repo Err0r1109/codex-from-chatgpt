@@ -52,6 +52,12 @@ class FakeAppServer implements AppServerClient {
       return { thread: { id: "thread-1" } } as T;
     }
     if (method === "thread/read") return { thread: this.readThread } as T;
+    if (method === "thread/turns/list") {
+      const turns = this.readThread && typeof this.readThread === "object" && Array.isArray((this.readThread as { turns?: unknown[] }).turns)
+        ? (this.readThread as { turns: unknown[] }).turns
+        : [];
+      return { data: turns, nextCursor: null, backwardsCursor: null } as T;
+    }
     if (method === "thread/list") return this.listedThreads as T;
     if (method === "thread/resume") {
       this.resolveResumeStarted();
