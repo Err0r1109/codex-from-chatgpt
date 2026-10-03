@@ -188,3 +188,13 @@ Validation after this change:
 - Browser-wake tests prove that a direct URL delivers without any marker proof, while recovered URLs still require marker proof and marker search remains fail-closed.
 - Complete wrapper suite: **155 tests: 154 passed, zero failed, one optional real-App-Server handshake skipped**.
 - No Codex model turn was used to implement this correction.
+
+### Live direct-binding acceptance, 2026-10-03
+
+The corrected primary path was exercised against the real Local Browser Bridge and a real completed ChatGPT synthetic conversation without invoking Codex. The wake was persisted with `binding_source: direct` and canonical URL `https://chatgpt.com/c/6abd5175-5e3c-83eb-b482-8cf918a4d31d`. Its newly generated marker `CW-BIND-ff0e8dd2-f3d7-44fe-98d1-17a9b238fdca` was not the marker registered in that conversation beforehand.
+
+The first tab-open result was again ambiguous, and the existing deterministic receipt reconciliation recovered it safely. The final action sequence was `open -> activate -> probe -> append -> probe -> send -> probe`: there was **no** `search`, `search_type` or `result` action. The wake reached `state=delivered`, `stage=verified`, and the target ChatGPT conversation rendered the new wake as a user message and started a fresh run that replied exactly `WAKEOK`. This proves the direct path no longer depends on ChatGPT search indexing or marker discovery.
+
+A live MCP wire check after deployment confirmed that `codex_task_create` exposes `conversation_url` and `conversation_id`, `codex_turn_submit` can inherit/accept the same fields, and server instructions require `binding_source=direct` plus non-null `conversation_url` before ChatGPT may end its response expecting autonomous browser wake. The plugin tools were refreshed in ChatGPT and the permission remained **Allow all tools**.
+
+The failed marker-only acceptance wake was cancelled while the bridge was stopped so its in-memory manager could not overwrite the cancellation. Production was then restarted with bridge, supervisor and official tunnel ready; browser-wake service is running and the obsolete wake is durably `cancelled`.
