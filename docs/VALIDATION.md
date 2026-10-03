@@ -159,7 +159,7 @@ Validation evidence:
 - Production state was checked before deployment work: state version 2 and no nonterminal Codex tasks.
 - No Codex worker/model turn was invoked to implement or validate this sentinel change.
 
-This section records deterministic/unit/integration readiness only. The final acceptance still requires a real ChatGPT conversation to end its response, Codex to complete later, the local sentinel to post a new wake message into that same conversation, and a fresh ChatGPT run to resume orchestration without an intermediate human message.
+This section originally recorded deterministic/unit/integration readiness only. A real Codex-backed direct-binding acceptance was later completed on 2026-10-03 and is documented below.
 
 ### Live browser-wake acceptance, 2026-09-30
 
@@ -169,7 +169,7 @@ The first `browser_open_tab` returned LBB `AMBIGUOUS_OUTCOME`; the sentinel corr
 
 ChatGPT then started a fresh run from that delivered browser message and rendered exactly `WAKEOK` as instructed. This establishes the local sleep/wake mechanism independently of a long-lived Sol response: a deterministic local process can post a new message into a completed ChatGPT conversation and trigger a new model run. No Codex model turn or API inference was consumed by this acceptance.
 
-The remaining acceptance is specifically Codex-backed orchestration: an explicitly user-authorized Codex task should end the initiating ChatGPT response, complete later, generate the durable wake from real task state, and let the newly triggered ChatGPT run read `codex_task_get` and continue the same authorized task. Because the bridge is USER-OPT-IN ONLY, that final test must not be started without a fresh explicit user instruction to use Codex for the acceptance test.
+This Codex-backed acceptance was subsequently run after a fresh explicit user instruction on 2026-10-03; the final results are recorded below under **Real Codex-backed direct-binding acceptance**.
 
 ## Direct conversation binding after Codex-backed marker failure, 2026-10-03
 
@@ -198,3 +198,21 @@ The first tab-open result was again ambiguous, and the existing deterministic re
 A live MCP wire check after deployment confirmed that `codex_task_create` exposes `conversation_url` and `conversation_id`, `codex_turn_submit` can inherit/accept the same fields, and server instructions require `binding_source=direct` plus non-null `conversation_url` before ChatGPT may end its response expecting autonomous browser wake. The plugin tools were refreshed in ChatGPT and the permission remained **Allow all tools**.
 
 The failed marker-only acceptance wake was cancelled while the bridge was stopped so its in-memory manager could not overwrite the cancellation. Production was then restarted with bridge, supervisor and official tunnel ready; browser-wake service is running and the obsolete wake is durably `cancelled`.
+
+## Real Codex-backed direct-binding acceptance, 2026-10-03
+
+A fresh explicit user instruction authorized Codex specifically for this final acceptance. Because the Android ChatGPT client did not expose the canonical URL of the initiating conversation, the test used a dedicated synthetic ChatGPT conversation as the wake target; its canonical URL was known directly before the Codex task was created. The target was instructed only to reply exactly `DIRECTWAKEOK` to later `[Codex Bridge wake ...]` messages and to use no tools.
+
+Task `619b9812-84a9-4f28-a6b6-96f2697eba83` was created in disposable workspace `C:\Codex\Experiments\direct-wake-final-20261003` with model `gpt-6-luna`, reasoning effort `low`, canonical conversation `https://chatgpt.com/c/6ac05c6d-e248-83ed-828d-3b307eb86929`, and returned `binding_source: direct`, `session_bound: true`. No `codex_task_wait` call was used for either turn.
+
+Turn 1 (`01a0ff6a-1d29-7500-9c87-f711c17989a1`) waited about 15 seconds, created `direct-wake-result.txt`, and verified the exact bytes `DIRECT-CODEX-WAKE-OK\n`. On completion, durable wake `wake_05ad7d27-3ffd-4e04-b0d9-b6b7d9568394` reached `state=delivered`, `stage=verified`, `binding_source=direct`. Its action sequence was `open,activate,probe,append,probe,send,probe`; there was no `search`, `search_type` or `result` action. The target ChatGPT conversation rendered the wake as a user message and started a fresh run that replied exactly `DIRECTWAKEOK`.
+
+A second turn was then submitted on the **same Codex thread** `01a0ff69-e6ac-7c63-a4bc-a3fa05110379` without changing the persisted binding. Turn 2 (`01a0ff6c-021e-7ba0-bac0-6f8d7d9415f2`) waited about 8 seconds, created `direct-wake-second.txt`, and verified the exact bytes `DIRECT-CODEX-WAKE-SECOND\n` while preserving the first file. Its wake `wake_5402e818-8f9a-4553-b770-634d076b3125` also reached `delivered/verified`, retained the same canonical direct binding, and used action sequence `activate,probe,append,probe,send,probe` with no search actions. The same ChatGPT conversation rendered the second wake and started another fresh run that again replied exactly `DIRECTWAKEOK`.
+
+Independent byte checks after both turns reported:
+- `direct-wake-result.txt`: 21 bytes, hex `4449524543542d434f4445582d57414b452d4f4b0a`.
+- `direct-wake-second.txt`: 25 bytes, hex `4449524543542d434f4445582d57414b452d5345434f4e440a`.
+
+The task finished with `turn_count: 2`, `status: completed`, no recovery requirement, and was then explicitly stopped so its Codex authorization cannot be reused. This acceptance proves that a real Codex completion can generate a durable browser wake against a pre-bound canonical ChatGPT conversation, that the wake can trigger a fresh ChatGPT run without marker discovery or Global Search, and that the same direct binding persists correctly across a second turn and second wake.
+
+One boundary remains intentional: the synthetic wake target did not itself call Codex after waking, because that separate conversation did not contain a fresh explicit user opt-in for Codex. The test therefore validates the complete Codex -> durable direct wake -> fresh ChatGPT run path and repeated same-thread direct wakes without fabricating cross-conversation authorization.
